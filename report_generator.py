@@ -1,4 +1,4 @@
-"""CSV + JSON + HTML report generation for smart_form_tester."""
+"""CSV + JSON + HTML report generation for FormIntel."""
 
 from __future__ import annotations
 
@@ -167,7 +167,7 @@ class ReportGenerator:
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Smart Form Tester Report</title>
+  <title>FormIntel Report</title>
   <style>
     :root{--bg:#0f0f0f;--panel:#171717;--text:#e5e5e5;--muted:#a3a3a3;
           --green:#22c55e;--red:#ef4444;--yellow:#f59e0b;--blue:#3b82f6;--border:#262626;}
@@ -245,7 +245,7 @@ class ReportGenerator:
 <div class="wrap">
 
   <div class="header">
-    <h1>Smart Form Tester — Test Report</h1>
+    <h1>FormIntel — Test Report</h1>
     <div class="sub">Generated: {{ generated_at }} &nbsp;·&nbsp;
       Source: <a href="{{ json_filename }}" style="color:#60a5fa;">{{ json_filename }}</a>
     </div>

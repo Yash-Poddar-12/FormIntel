@@ -1,4 +1,4 @@
-"""Gemini-backed AI engine for smart_form_tester."""
+"""Gemini-backed AI engine for FormIntel."""
 
 from __future__ import annotations
 

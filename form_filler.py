@@ -1,4 +1,4 @@
-"""Form filling utilities for smart_form_tester."""
+"""Form filling utilities for FormIntel."""
 
 from __future__ import annotations
 

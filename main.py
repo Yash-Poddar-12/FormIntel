@@ -1,4 +1,4 @@
-"""CLI entrypoint for smart_form_tester."""
+"""CLI entrypoint for FormIntel."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""DOM field detection for smart_form_tester."""
+"""DOM field detection for FormIntel."""
 
 from __future__ import annotations
 
