@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Smart Form Tester Mock Form</title>
+  <style>
+    :root {
+      --bg: #f5f7fb;
+      --card: #ffffff;
+      --text: #1f2937;
+      --muted: #6b7280;
+      --accent: #2563eb;
+      --border: #d1d5db;
+    }
+    * {
+      box-sizing: border-box;
+    }
+    body {
+      margin: 0;
+      font-family: Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      padding: 24px;
+    }
+    .container {
+      max-width: 760px;
+      margin: 0 auto;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 24px;
+      box-shadow: 0 10px 20px rgba(0, 0, 0, 0.04);
+    }
+    h1 {
+      margin: 0 0 8px;
+      font-size: 24px;
+    }
+    p {
+      margin: 0 0 20px;
+      color: var(--muted);
+    }
+    .field {
+      margin-bottom: 16px;
+    }
+    label {
+      display: block;
+      margin-bottom: 6px;
+      font-weight: 600;
+    }
+    input,
+    select,
+    textarea {
+      width: 100%;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 12px;
+      font-size: 14px;
+      color: var(--text);
+      background: #fff;
+    }
+    input[type="range"] {
+      padding: 0;
+    }
+    fieldset {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px;
+      margin: 0;
+    }
+    legend {
+      font-weight: 600;
+      padding: 0 6px;
+    }
+    .inline-options {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      margin-top: 8px;
+    }
+    .inline-options label {
+      font-weight: 400;
+      margin: 0;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .checkbox-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .checkbox-row input {
+      width: auto;
+    }
+    button {
+      width: 100%;
+      border: none;
+      border-radius: 8px;
+      padding: 12px;
+      background: var(--accent);
+      color: #fff;
+      font-size: 15px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    button:hover {
+      filter: brightness(0.95);
+    }
+    .success {
+      border: 1px solid #22c55e;
+      background: #f0fdf4;
+      color: #14532d;
+      border-radius: 10px;
+      padding: 16px;
+      font-size: 16px;
+      line-height: 1.5;
+      font-weight: 600;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Application Form</h1>
+    <p>Use this mock form to test Smart Form Tester end-to-end.</p>
+
+    <form id="applicationForm" novalidate>
+      <div class="field">
+        <label for="full_name">Full Name</label>
+        <input id="full_name" name="full_name" type="text" required />
+      </div>
+
+      <div class="field">
+        <label for="email">Email</label>
+        <input id="email" name="email" type="email" required />
+      </div>
+
+      <div class="field">
+        <label for="mobile">Mobile</label>
+        <input
+          id="mobile"
+          name="mobile"
+          type="tel"
+          placeholder="Mobile Number"
+          pattern="[6-9][0-9]{9}"
+          required
+        />
+      </div>
+
+      <div class="field">
+        <label for="annual_income">Annual Income</label>
+        <input
+          id="annual_income"
+          name="annual_income"
+          type="number"
+          min="10000"
+          max="100000"
+          required
+        />
+      </div>
+
+      <div class="field">
+        <label for="dob">Date of Birth</label>
+        <input id="dob" name="dob" type="date" required />
+      </div>
+
+      <div class="field">
+        <label for="rating">Rating</label>
+        <input id="rating" name="rating" type="range" min="1" max="10" step="1" value="5" />
+      </div>
+
+      <div class="field">
+        <label for="gender">Gender</label>
+        <select id="gender" name="gender" required>
+          <option value="">Select Gender</option>
+          <option value="Male">Male</option>
+          <option value="Female">Female</option>
+          <option value="Other">Other</option>
+        </select>
+      </div>
+
+      <div class="field">
+        <fieldset>
+          <legend>Employment</legend>
+          <div class="inline-options">
+            <label><input type="radio" name="employment" value="Salaried" required /> Salaried</label>
+            <label><input type="radio" name="employment" value="Self-Employed" /> Self-Employed</label>
+            <label><input type="radio" name="employment" value="Business" /> Business</label>
+          </div>
+        </fieldset>
+      </div>
+
+      <div class="field">
+        <label class="checkbox-row">
+          <input id="agree_terms" name="agree_terms" type="checkbox" required />
+          I agree to terms
+        </label>
+      </div>
+
+      <div class="field">
+        <label for="address">Address</label>
+        <textarea id="address" name="address" rows="3" required></textarea>
+      </div>
+
+      <div class="field">
+        <label for="pan_number">PAN Number</label>
+        <input
+          id="pan_number"
+          name="pan_number"
+          type="text"
+          placeholder="PAN Number"
+          pattern="[A-Z]{5}[0-9]{4}[A-Z]{1}"
+          required
+        />
+      </div>
+
+      <button type="submit">Submit Application</button>
+    </form>
+  </div>
+
+  <script>
+    (function () {
+      const form = document.getElementById("applicationForm");
+      const container = document.querySelector(".container");
+
+      form.addEventListener("submit", function (event) {
+        if (!form.checkValidity()) {
+          event.preventDefault();
+          form.reportValidity();
+          return;
+        }
+
+        event.preventDefault();
+        container.innerHTML =
+          '<div class="success">Thank you! Your application has been submitted. Reference Number: REF123456</div>';
+      });
+    })();
+  </script>
+</body>
+</html>
