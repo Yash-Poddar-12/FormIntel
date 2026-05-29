@@ -24,14 +24,29 @@ class TestRunner:
         baseline_values: dict | None = None
         fields: list[dict] = []
 
+        # ----------------------------------------------------------------
         # PHASE 1: BASELINE CONVERGENCE
+        # ----------------------------------------------------------------
         for iteration in range(config.max_convergence_iterations):
             try:
                 page.goto(url, wait_until="domcontentloaded")
-                page.wait_for_timeout(3000)
+                page.wait_for_timeout(5000)
+
+                # Wait for inputs to actually appear (important for SPAs)
+                try:
+                    page.wait_for_selector(
+                        "input, select, textarea",
+                        timeout=10000
+                    )
+                except Exception:
+                    print(f"[Iteration {iteration + 1}] Warning: No inputs found after 10s wait")
 
                 fields = detector.detect(page)
                 print(f"[Iteration {iteration + 1}] Detected {len(fields)} fields")
+
+                if len(fields) == 0:
+                    print(f"[Iteration {iteration + 1}] No fields detected — skipping iteration")
+                    continue
 
                 if iteration == 0:
                     baseline_values = ai.generate_baseline_values(fields)
@@ -48,9 +63,7 @@ class TestRunner:
 
                 errors = handler.detect_errors(page)
                 success = handler.detect_success(page)
-                status, reason = self._determine_status(
-                    validation_msgs, errors, success
-                )
+                status, reason = self._determine_status(validation_msgs, errors, success)
 
                 print(f"[Iteration {iteration + 1}] Status: {status} — {reason}")
 
@@ -58,6 +71,7 @@ class TestRunner:
                     "test_name": f"BASELINE_ITER_{iteration + 1}",
                     "changed_field": None,
                     "changed_value": None,
+                    "variation_type": "baseline",
                     "all_values": baseline_values,
                     "validation_messages": validation_msgs,
                     "page_errors": errors,
@@ -78,6 +92,7 @@ class TestRunner:
                     "test_name": f"BASELINE_ITER_{iteration + 1}",
                     "changed_field": None,
                     "changed_value": None,
+                    "variation_type": "baseline",
                     "all_values": baseline_values or {},
                     "validation_messages": {},
                     "page_errors": [str(exc)],
@@ -91,68 +106,90 @@ class TestRunner:
         if passing_baseline is None:
             passing_baseline = baseline_values or {}
 
-        # PHASE 2: N+1 VARIATION TESTING
+        # If no fields were detected at all, stop here
+        if not fields:
+            print("[TestRunner] No fields detected on page — cannot run variation tests.")
+            return results
+
+        # ----------------------------------------------------------------
+        # PHASE 2: MULTI-VARIATION TESTING PER FIELD
+        # ----------------------------------------------------------------
         for field in fields:
             if field.get("skip"):
                 continue
 
             field_idx = str(field["index"])
             field_label = field.get("label", f"field_{field_idx}")
-            test_values: dict = {}
 
-            try:
-                invalid_value = ai.generate_single_field_variation(
-                    field, passing_baseline.get(field_idx), "invalid"
-                )
+            variations = ai.generate_field_invalid_variations(
+                field, passing_baseline.get(field_idx)
+            )
 
-                test_values = passing_baseline.copy()
-                test_values[field_idx] = invalid_value
+            print(f"\n[Field '{field_label}'] Testing {len(variations)} invalid variations:")
+            for v in variations:
+                print(f"  • {v['variation_name']}: {repr(v['value'])}")
 
-                print(f"[Variation] '{field_label}' → invalid: {invalid_value}")
+            for variation in variations:
+                variation_name = variation.get("variation_name", "invalid")
+                invalid_value = variation.get("value", "")
+                test_values: dict = {}
 
-                page.goto(url, wait_until="domcontentloaded")
-                page.wait_for_timeout(2000)
+                try:
+                    test_values = passing_baseline.copy()
+                    test_values[field_idx] = invalid_value
 
-                validation_msgs = filler.fill_all(page, fields, test_values)
-                _ = handler.click_submit_or_next(page)
-                page.wait_for_timeout(2000)
+                    page.goto(url, wait_until="domcontentloaded")
+                    page.wait_for_timeout(5000)
+                    try:
+                        page.wait_for_selector(
+                            "input, select, textarea",
+                            timeout=10000
+                        )
+                    except Exception:
+                        pass
 
-                errors = handler.detect_errors(page)
-                success = handler.detect_success(page)
-                status, reason = self._determine_status(
-                    validation_msgs, errors, success
-                )
+                    validation_msgs = filler.fill_all(page, fields, test_values)
+                    _ = handler.click_submit_or_next(page)
+                    page.wait_for_timeout(2000)
 
-                print(f"[Variation] '{field_label}' → {status} — {reason}")
+                    errors = handler.detect_errors(page)
+                    success = handler.detect_success(page)
+                    status, reason = self._determine_status(
+                        validation_msgs, errors, success
+                    )
 
-                results.append({
-                    "test_name": f"FIELD_{field['index']}_INVALID",
-                    "changed_field": field_label,
-                    "changed_value": invalid_value,
-                    "all_values": test_values,
-                    "validation_messages": validation_msgs,
-                    "page_errors": errors,
-                    "status": status,
-                    "pass_reason": reason,
-                    "url": page.url,
-                    "page_number": handler.get_current_page_number(page),
-                })
+                    print(f"  [{variation_name}] → {status} — {reason}")
 
-            except Exception as exc:
-                print(f"[Variation] Error on '{field_label}': {exc}")
-                results.append({
-                    "test_name": f"FIELD_{field['index']}_INVALID",
-                    "changed_field": field_label,
-                    "changed_value": None,
-                    "all_values": test_values,
-                    "validation_messages": {},
-                    "page_errors": [str(exc)],
-                    "status": "ERROR",
-                    "pass_reason": str(exc),
-                    "url": "",
-                    "page_number": 1,
-                })
-                continue
+                    results.append({
+                        "test_name": f"FIELD_{field['index']}_{variation_name.upper()}",
+                        "changed_field": field_label,
+                        "changed_value": invalid_value,
+                        "variation_type": variation_name,
+                        "all_values": test_values,
+                        "validation_messages": validation_msgs,
+                        "page_errors": errors,
+                        "status": status,
+                        "pass_reason": reason,
+                        "url": page.url,
+                        "page_number": handler.get_current_page_number(page),
+                    })
+
+                except Exception as exc:
+                    print(f"  [{variation_name}] ERROR: {exc}")
+                    results.append({
+                        "test_name": f"FIELD_{field['index']}_{variation_name.upper()}",
+                        "changed_field": field_label,
+                        "changed_value": invalid_value if invalid_value else None,
+                        "variation_type": variation_name,
+                        "all_values": test_values,
+                        "validation_messages": {},
+                        "page_errors": [str(exc)],
+                        "status": "ERROR",
+                        "pass_reason": str(exc),
+                        "url": "",
+                        "page_number": 1,
+                    })
+                    continue
 
         return results
 
@@ -162,33 +199,15 @@ class TestRunner:
         page_errors: list[str],
         success: bool,
     ) -> tuple[str, str]:
-        """
-        Determine PASS or FAIL based on client-side signals only.
-
-        Rules (in priority order):
-        1. Server confirmed success (thank you page, URL change) → PASS
-        2. Browser HTML5 validation fired on any field → FAIL
-           (field.validationMessage is non-empty — format was rejected)
-        3. Visible error elements on page (aria-invalid, .error classes) → FAIL
-        4. No browser validation errors + no visible error elements → PASS
-           (values were format-correct and accepted client-side;
-            server rejection due to fake data is ignored intentionally)
-        """
         if success:
             return "PASS", "Server confirmed successful submission"
 
-        # Check browser-level HTML5 validation messages
-        browser_errors = {
-            k: v for k, v in validation_msgs.items()
-            if v and str(v).strip()
-        }
+        browser_errors = {k: v for k, v in validation_msgs.items() if v and str(v).strip()}
         if browser_errors:
             fields_with_errors = ", ".join(browser_errors.keys())
             return "FAIL", f"Browser validation failed on fields: {fields_with_errors}"
 
-        # Check visible error elements (CSS-based, not keyword scan)
         if page_errors:
             return "FAIL", f"Visible error elements detected: {page_errors[0][:80]}"
 
-        # No client-side errors — values were valid format-wise
         return "PASS", "Values accepted client-side (no browser or element errors)"

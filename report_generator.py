@@ -12,7 +12,6 @@ from jinja2 import Template
 
 
 class ReportGenerator:
-    """Generate CSV, JSON and styled HTML reports from test results."""
 
     def generate(
         self,
@@ -26,7 +25,7 @@ class ReportGenerator:
         if not timestamp:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-        csv_path = output_path / f"report_{timestamp}.csv"
+        csv_path  = output_path / f"report_{timestamp}.csv"
         json_path = output_path / f"report_{timestamp}.json"
         html_path = output_path / f"report_{timestamp}.html"
 
@@ -45,9 +44,10 @@ class ReportGenerator:
                 "Test Number",
                 "Test Name",
                 "Changed Field",
+                "Variation Type",
                 "Changed Value",
                 "Status",
-                "Pass Reason",
+                "Pass/Fail Reason",
                 "Page Errors",
                 "Validation Messages",
                 "Final URL",
@@ -58,6 +58,7 @@ class ReportGenerator:
                     i,
                     row.get("test_name", ""),
                     row.get("changed_field") or "—",
+                    row.get("variation_type", ""),
                     self._to_json_string(row.get("changed_value")),
                     row.get("status", ""),
                     row.get("pass_reason", ""),
@@ -68,9 +69,9 @@ class ReportGenerator:
                 ])
 
     def _generate_json(self, results: list[dict], json_path: Path, timestamp: str) -> None:
-        total = len(results)
-        pass_count = sum(1 for r in results if str(r.get("status", "")).upper() == "PASS")
-        fail_count = sum(1 for r in results if str(r.get("status", "")).upper() == "FAIL")
+        total      = len(results)
+        pass_count  = sum(1 for r in results if str(r.get("status", "")).upper() == "PASS")
+        fail_count  = sum(1 for r in results if str(r.get("status", "")).upper() == "FAIL")
         error_count = total - pass_count - fail_count
 
         payload = {
@@ -87,17 +88,18 @@ class ReportGenerator:
 
         for i, row in enumerate(results, start=1):
             payload["results"].append({
-                "test_number": i,
-                "test_name": row.get("test_name", ""),
-                "changed_field": row.get("changed_field") or None,
-                "changed_value": row.get("changed_value"),
-                "status": str(row.get("status", "")).upper(),
-                "pass_reason": row.get("pass_reason", ""),
-                "page_errors": row.get("page_errors") or [],
-                "validation_messages": row.get("validation_messages") or {},
-                "all_field_values": row.get("all_values") or {},
-                "final_url": row.get("url", ""),
-                "page_number": row.get("page_number", 1),
+                "test_number":        i,
+                "test_name":          row.get("test_name", ""),
+                "changed_field":      row.get("changed_field") or None,
+                "variation_type":     row.get("variation_type", ""),
+                "changed_value":      row.get("changed_value"),
+                "status":             str(row.get("status", "")).upper(),
+                "pass_reason":        row.get("pass_reason", ""),
+                "page_errors":        row.get("page_errors") or [],
+                "validation_messages":row.get("validation_messages") or {},
+                "all_field_values":   row.get("all_values") or {},
+                "final_url":          row.get("url", ""),
+                "page_number":        row.get("page_number", 1),
             })
 
         json_path.write_text(
@@ -106,23 +108,24 @@ class ReportGenerator:
         )
 
     def _generate_html_from_json(self, json_path: Path, html_path: Path) -> None:
-        raw = json.loads(json_path.read_text(encoding="utf-8"))
-        meta = raw.get("meta", {})
+        raw     = json.loads(json_path.read_text(encoding="utf-8"))
+        meta    = raw.get("meta", {})
         results = raw.get("results", [])
 
         rows = []
         for row in results:
             rows.append({
-                "test_number": row.get("test_number"),
-                "test_name": row.get("test_name", ""),
-                "changed_field": row.get("changed_field") or "—",
-                "changed_value": self._to_json_string(row.get("changed_value")),
-                "status": str(row.get("status", "")).upper(),
-                "pass_reason": row.get("pass_reason", ""),
-                "errors": " | ".join(row.get("page_errors") or []) or "—",
-                "validation": self._to_json_string(row.get("validation_messages") or {}),
-                "url": row.get("final_url", ""),
-                "page_number": row.get("page_number", 1),
+                "test_number":    row.get("test_number"),
+                "test_name":      row.get("test_name", ""),
+                "changed_field":  row.get("changed_field") or "—",
+                "variation_type": row.get("variation_type", ""),
+                "changed_value":  self._to_json_string(row.get("changed_value")),
+                "status":         str(row.get("status", "")).upper(),
+                "pass_reason":    row.get("pass_reason", ""),
+                "errors":         " | ".join(row.get("page_errors") or []) or "—",
+                "validation":     self._to_json_string(row.get("validation_messages") or {}),
+                "url":            row.get("final_url", ""),
+                "page_number":    row.get("page_number", 1),
                 "all_values_json": json.dumps(
                     row.get("all_field_values") or {}, indent=2, ensure_ascii=False
                 ),
@@ -152,9 +155,7 @@ class ReportGenerator:
     @staticmethod
     def _to_json_string(value: Any, pretty: bool = False) -> str:
         try:
-            if pretty:
-                return json.dumps(value, indent=2, ensure_ascii=False)
-            return json.dumps(value, ensure_ascii=False)
+            return json.dumps(value, indent=2 if pretty else None, ensure_ascii=False)
         except Exception:
             return str(value)
 
@@ -169,15 +170,17 @@ class ReportGenerator:
   <title>Smart Form Tester Report</title>
   <style>
     :root{--bg:#0f0f0f;--panel:#171717;--text:#e5e5e5;--muted:#a3a3a3;
-          --green:#22c55e;--red:#ef4444;--yellow:#f59e0b;--border:#262626;}
+          --green:#22c55e;--red:#ef4444;--yellow:#f59e0b;--blue:#3b82f6;--border:#262626;}
     *{box-sizing:border-box;margin:0;padding:0;}
     body{background:var(--bg);color:var(--text);
          font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;}
-    .wrap{max-width:1380px;margin:28px auto;padding:0 16px 40px;}
+    .wrap{max-width:1400px;margin:28px auto;padding:0 16px 40px;}
+
     .header{background:var(--panel);border:1px solid var(--border);
             border-radius:14px;padding:20px 24px;margin-bottom:16px;}
     .header h1{font-size:22px;font-weight:700;}
     .header .sub{margin-top:6px;color:var(--muted);font-size:13px;}
+
     .cards{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:18px;}
     .card{background:var(--panel);border:1px solid var(--border);
           border-radius:12px;padding:16px 14px;}
@@ -186,13 +189,16 @@ class ReportGenerator:
     .card.pass .val{color:var(--green);}
     .card.fail .val{color:var(--red);}
     .card.warn .val{color:var(--yellow);}
+
     .toolbar{display:flex;gap:10px;margin-bottom:14px;flex-wrap:wrap;align-items:center;}
     .toolbar input{flex:1;min-width:200px;background:#111;border:1px solid var(--border);
                    border-radius:8px;padding:8px 12px;color:var(--text);font-size:13px;}
     .toolbar input:focus{outline:none;border-color:#555;}
     .filter-btn{padding:7px 14px;border-radius:8px;border:1px solid var(--border);
-                background:#111;color:var(--muted);font-size:12px;cursor:pointer;}
+                background:#111;color:var(--muted);font-size:12px;cursor:pointer;
+                transition:all .15s;}
     .filter-btn.active{border-color:#555;color:var(--text);background:#1e1e1e;}
+
     .tbl-wrap{background:var(--panel);border:1px solid var(--border);
               border-radius:14px;overflow:hidden;}
     table{width:100%;border-collapse:collapse;}
@@ -205,13 +211,20 @@ class ReportGenerator:
     tbody tr.main-row.fail{border-left:4px solid var(--red);}
     tbody tr.main-row.error{border-left:4px solid var(--yellow);}
     tbody td{padding:10px;font-size:13px;vertical-align:top;word-break:break-word;}
+
     .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:12px;}
     .badge{display:inline-block;padding:3px 10px;border-radius:999px;font-size:11px;
            font-weight:700;letter-spacing:.04em;text-transform:uppercase;}
     .badge.PASS{background:rgba(34,197,94,.15);color:#86efac;border:1px solid rgba(34,197,94,.35);}
     .badge.FAIL{background:rgba(239,68,68,.15);color:#fca5a5;border:1px solid rgba(239,68,68,.35);}
     .badge.ERROR{background:rgba(245,158,11,.15);color:#fcd34d;border:1px solid rgba(245,158,11,.35);}
+
+    .vtag{display:inline-block;padding:2px 8px;border-radius:6px;font-size:11px;
+          background:rgba(59,130,246,.15);color:#93c5fd;border:1px solid rgba(59,130,246,.3);
+          font-family:ui-monospace,monospace;}
+
     .reason{font-size:11px;color:var(--muted);margin-top:3px;}
+
     tr.detail-row{display:none;background:#111;}
     tr.detail-row.open{display:table-row;}
     .detail-inner{padding:14px 16px 18px;display:grid;grid-template-columns:1fr 1fr;gap:14px;}
@@ -219,11 +232,18 @@ class ReportGenerator:
                        letter-spacing:.05em;margin-bottom:8px;}
     pre{background:#0b0b0b;border:1px solid var(--border);border-radius:8px;padding:12px;
         color:#d4d4d4;overflow:auto;max-height:260px;font-size:12px;line-height:1.5;}
+
     tr.main-row.hidden-row{display:none;}
+
+    @media(max-width:900px){
+      .cards{grid-template-columns:repeat(2,1fr);}
+      .detail-inner{grid-template-columns:1fr;}
+    }
   </style>
 </head>
 <body>
 <div class="wrap">
+
   <div class="header">
     <h1>Smart Form Tester — Test Report</h1>
     <div class="sub">Generated: {{ generated_at }} &nbsp;·&nbsp;
@@ -240,7 +260,7 @@ class ReportGenerator:
   </div>
 
   <div class="toolbar">
-    <input id="searchBox" type="text" placeholder="Search test name, field, value…"/>
+    <input id="searchBox" type="text" placeholder="Search test name, field, variation type…"/>
     <button class="filter-btn active" data-filter="ALL">All</button>
     <button class="filter-btn" data-filter="PASS">PASS</button>
     <button class="filter-btn" data-filter="FAIL">FAIL</button>
@@ -251,40 +271,48 @@ class ReportGenerator:
     <table>
       <thead>
         <tr>
-          <th>#</th><th>Test Name</th><th>Changed Field</th>
-          <th>Changed Value</th><th>Status</th><th>Errors</th><th>URL</th>
+          <th>#</th>
+          <th>Test Name</th>
+          <th>Changed Field</th>
+          <th>Variation Type</th>
+          <th>Invalid Value Used</th>
+          <th>Status</th>
+          <th>Reason</th>
+          <th>URL</th>
         </tr>
       </thead>
       <tbody>
         {% for row in rows %}
         <tr class="main-row {{ row.status | lower }}"
             data-status="{{ row.status }}"
-            data-search="{{ row.test_name }} {{ row.changed_field }} {{ row.changed_value }}"
+            data-search="{{ row.test_name }} {{ row.changed_field }} {{ row.variation_type }} {{ row.changed_value }}"
             data-detail="detail-{{ row.test_number }}">
           <td>{{ row.test_number }}</td>
-          <td>{{ row.test_name }}</td>
+          <td class="mono" style="font-size:12px;">{{ row.test_name }}</td>
           <td>{{ row.changed_field }}</td>
+          <td>
+            {% if row.variation_type %}
+              <span class="vtag">{{ row.variation_type }}</span>
+            {% else %}—{% endif %}
+          </td>
           <td class="mono">{{ row.changed_value }}</td>
           <td>
             <span class="badge {{ row.status }}">{{ row.status }}</span>
-            {% if row.pass_reason %}
-              <div class="reason">{{ row.pass_reason }}</div>
-            {% endif %}
           </td>
-          <td style="max-width:280px;font-size:12px;">{{ row.errors }}</td>
+          <td style="font-size:12px;color:var(--muted);">{{ row.pass_reason }}</td>
           <td class="mono" style="font-size:11px;">{{ row.url }}</td>
         </tr>
         <tr id="detail-{{ row.test_number }}" class="detail-row">
-          <td colspan="7">
+          <td colspan="8">
             <div class="detail-inner">
               <div class="detail-section">
-                <h4>All Field Values Used</h4>
+                <h4>All Field Values Used in This Test</h4>
                 <pre class="mono">{{ row.all_values_json }}</pre>
               </div>
               <div class="detail-section">
                 <h4>Browser Validation Messages</h4>
                 <pre class="mono">{{ row.validation }}</pre>
-                <h4 style="margin-top:14px;">Page Errors Detected</h4>
+                <h4 style="margin-top:14px;">Page Error Elements Detected</h4>
                 <pre class="mono">{{ row.errors }}</pre>
               </div>
             </div>
@@ -294,6 +322,7 @@ class ReportGenerator:
       </tbody>
     </table>
   </div>
+
 </div>
 <script>
 (function(){
@@ -303,6 +332,7 @@ class ReportGenerator:
       if(d) d.classList.toggle("open");
     });
   });
+
   let activeFilter="ALL";
   document.querySelectorAll(".filter-btn").forEach(btn=>{
     btn.addEventListener("click",()=>{
@@ -312,14 +342,17 @@ class ReportGenerator:
       applyFilters();
     });
   });
-  document.getElementById("searchBox").addEventListener("input",applyFilters);
+
+  document.getElementById("searchBox").addEventListener("input", applyFilters);
+
   function applyFilters(){
     const q=document.getElementById("searchBox").value.toLowerCase();
     document.querySelectorAll("tr.main-row").forEach(row=>{
       const ms=activeFilter==="ALL"||row.getAttribute("data-status")===activeFilter;
       const mq=!q||(row.getAttribute("data-search")||"").toLowerCase().includes(q);
-      row.classList.toggle("hidden-row",!(ms&&mq));
-      if(!(ms&&mq)){
+      const show=ms&&mq;
+      row.classList.toggle("hidden-row",!show);
+      if(!show){
         const d=document.getElementById(row.getAttribute("data-detail"));
         if(d) d.classList.remove("open");
       }
