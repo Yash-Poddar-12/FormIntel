@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import re
+import time
 from datetime import date
 from typing import Any
 
@@ -15,7 +17,6 @@ class AIEngine:
 
     def __init__(self, config: Any) -> None:
         self.config = config
-        # REPLACE WITH:
         self.api_key = getattr(config, "gemini_api_key", "") or getattr(config, "GEMINI_API_KEY", "")
         self.model_name = getattr(config, "gemini_model_name", "") or getattr(config, "GEMINI_MODEL_NAME", "gemini-2.5-flash")
         self.system_prompt = getattr(config, "system_prompt", "") or getattr(config, "SYSTEM_PROMPT", "")
@@ -30,7 +31,7 @@ class AIEngine:
                 model_name=self.model_name,
                 system_instruction=self.system_prompt,
             )
-        except Exception as exc:  # pylint: disable=broad-except
+        except Exception as exc:
             print(f"[AIEngine] Initialization error: {exc}")
             self.model = None
 
@@ -66,7 +67,7 @@ Fields:
                 value = raw.get(key, self._fallback_single_baseline(field))
                 final[key] = self._coerce_value_for_field(field, value, mode="valid")
             return final
-        except Exception as exc:  # pylint: disable=broad-except
+        except Exception as exc:
             print(f"[AIEngine] generate_baseline_values error: {exc}")
             return self._fallback_baseline_values(fields)
 
@@ -102,7 +103,7 @@ Current value:
                     field, raw["value"], mode="invalid" if variation_type == "invalid" else "valid"
                 )
             return self._fallback_variation(field, variation_type, current_value)
-        except Exception as exc:  # pylint: disable=broad-except
+        except Exception as exc:
             print(f"[AIEngine] generate_single_field_variation error: {exc}")
             return self._fallback_variation(field, variation_type, current_value)
 
@@ -138,21 +139,46 @@ Page text:
             for key, value in raw.items():
                 cleaned[str(key)] = str(value)
             return cleaned
-        except Exception as exc:  # pylint: disable=broad-except
+        except Exception as exc:
             print(f"[AIEngine] analyze_page_errors error: {exc}")
             return {}
 
     def _generate_json(self, prompt: str) -> Any:
         if self.model is None:
             raise RuntimeError("Gemini model is not initialized")
-        response = self.model.generate_content(
-            prompt,
-            generation_config=genai.GenerationConfig(response_mime_type="application/json"),
-        )
-        text = self._extract_text_from_response(response)
-        if not text:
-            raise ValueError("Empty response from Gemini")
-        return self._safe_json_loads(text)
+
+        last_exc: Exception | None = None
+
+        for attempt in range(3):
+            try:
+                response = self.model.generate_content(
+                    prompt,
+                    generation_config=genai.GenerationConfig(
+                        response_mime_type="application/json"
+                    ),
+                )
+                text = self._extract_text_from_response(response)
+                if not text:
+                    raise ValueError("Empty response from Gemini")
+                return self._safe_json_loads(text)
+
+            except Exception as exc:
+                last_exc = exc
+                error_str = str(exc)
+
+                if "429" in error_str or "quota" in error_str.lower():
+                    # Extract exact retry delay from the error message
+                    match = re.search(r"retry_delay\s*\{\s*seconds:\s*(\d+)", error_str)
+                    wait = int(match.group(1)) + 2 if match else 15
+                    print(f"[AIEngine] Rate limited. Waiting {wait}s before retry {attempt + 1}/3...")
+                    time.sleep(wait)
+                    continue
+                else:
+                    # Non-rate-limit error — don't retry
+                    raise
+
+        # All 3 attempts exhausted
+        raise last_exc  # type: ignore[misc]
 
     @staticmethod
     def _extract_text_from_response(response: Any) -> str:
@@ -189,11 +215,11 @@ Page text:
             first_brace = text.find("{")
             last_brace = text.rfind("}")
             if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
-                return json.loads(text[first_brace : last_brace + 1])
+                return json.loads(text[first_brace: last_brace + 1])
             first_bracket = text.find("[")
             last_bracket = text.rfind("]")
             if first_bracket != -1 and last_bracket != -1 and last_bracket > first_bracket:
-                return json.loads(text[first_bracket : last_bracket + 1])
+                return json.loads(text[first_bracket: last_bracket + 1])
             raise
 
     def _fallback_baseline_values(self, fields: list[dict]) -> dict:
@@ -353,4 +379,3 @@ Page text:
         if integer_only:
             return int(round(mid))
         return mid
-

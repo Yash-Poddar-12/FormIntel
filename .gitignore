@@ -1,11 +1,57 @@
+# Virtual environment
 venv/
+.venv/
+env/
+
+# Environment variables - NEVER commit this
 .env
+.env.*
+
+# Python cache
 __pycache__/
 *.pyc
 *.pyo
-report_*.html
-report_*.csv
-.pytest_cache/
-*.egg-info/
+*.pyd
+.Python
+
+# Reports output (all run subfolders)
+reports/
+
+# Playwright
+test-results/
+playwright-report/
+.playwright/
+
+# VS Code
+.vscode/
+
+# PyCharm / JetBrains
+.idea/
+
+# Windows
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Mac
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Logs
+*.log
+logs/
+
+# Distribution / packaging
 dist/
 build/
+*.egg-info/
+*.egg
+
+# pytest
+.pytest_cache/
+htmlcov/
+.coverage
+
+# Jupyter
+.ipynb_checkpoints/

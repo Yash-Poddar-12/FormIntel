@@ -27,7 +27,7 @@ class MultiPageHandler:
                     submit.click()
                     clicked = True
                     clicked_kind = "submitted"
-            except Exception as exc:  # pylint: disable=broad-except
+            except Exception as exc:
                 print(f"[MultiPageHandler] Submit click failed: {exc}")
 
         # b) semantic next/continue style buttons
@@ -41,7 +41,7 @@ class MultiPageHandler:
                         clicked = True
                         clicked_kind = "next_clicked" if text in {"next", "continue", "proceed"} else "submitted"
                         break
-                except Exception as exc:  # pylint: disable=broad-except
+                except Exception as exc:
                     print(f"[MultiPageHandler] Role button click failed for '{text}': {exc}")
 
         # c) any visible enabled button fallback
@@ -82,7 +82,7 @@ class MultiPageHandler:
         """Detect likely successful submission state."""
         try:
             body_text = page.inner_text("body").lower()
-        except Exception:  # pylint: disable=broad-except
+        except Exception:
             body_text = ""
 
         success_keywords = [
@@ -99,55 +99,25 @@ class MultiPageHandler:
 
         try:
             forms_disappeared = page.locator("form").count() == 0
-        except Exception:  # pylint: disable=broad-except
+        except Exception:
             forms_disappeared = False
 
         return keyword_hit or forms_disappeared
 
     def detect_errors(self, page: Page) -> list[str]:
-        """Collect deduplicated error-like messages from page body and error elements."""
+        """
+        Collect errors ONLY from visible error-flagged elements.
+        Does NOT scan body text keywords — avoids false FAILs on
+        real sites where page content contains words like 'error' or 'invalid'.
+        """
         errors: list[str] = []
         seen: set[str] = set()
 
-        try:
-            body_text = page.inner_text("body")
-        except Exception:  # pylint: disable=broad-except
-            body_text = ""
-
-        body_lower = body_text.lower()
-        keywords = [
-            "invalid",
-            "required",
-            "incorrect",
-            "error",
-            "failed",
-            "please enter",
-            "must be",
-            "not valid",
-            "cannot be",
-        ]
-
-        if body_text:
-            for raw_line in body_text.splitlines():
-                line = raw_line.strip()
-                if not line:
-                    continue
-                line_l = line.lower()
-                if any(key in line_l for key in keywords):
-                    if line not in seen:
-                        seen.add(line)
-                        errors.append(line)
-
-            # Fallback if everything is in a single paragraph
-            if not errors and any(key in body_lower for key in keywords):
-                compact = " ".join(body_text.split())
-                if compact and compact not in seen:
-                    seen.add(compact)
-                    errors.append(compact)
-
         selectors = (
-            ".error, .invalid, .field-error, [class*='error'], "
-            "[class*='invalid'], [aria-invalid='true']"
+            ".error, .invalid, .field-error, .form-error, "
+            "[class*='error-msg'], [class*='field-error'], "
+            "[class*='validation-error'], [aria-invalid='true'], "
+            ".ng-invalid.ng-touched, .is-invalid"
         )
         try:
             nodes = page.locator(selectors)
@@ -160,7 +130,7 @@ class MultiPageHandler:
                         errors.append(text)
                 except Exception:
                     continue
-        except Exception as exc:  # pylint: disable=broad-except
+        except Exception as exc:
             print(f"[MultiPageHandler] Error locator scan failed: {exc}")
 
         return errors
@@ -169,7 +139,7 @@ class MultiPageHandler:
         """Infer current step/page number from text or active step indicators."""
         try:
             body_text = page.inner_text("body")
-        except Exception:  # pylint: disable=broad-except
+        except Exception:
             body_text = ""
 
         if body_text:
@@ -188,7 +158,7 @@ class MultiPageHandler:
                 if num_match:
                     return int(num_match.group(1))
                 return 1
-        except Exception:  # pylint: disable=broad-except
+        except Exception:
             pass
 
         return 1
@@ -220,4 +190,3 @@ class MultiPageHandler:
             return int(value) if value is not None else 0
         except Exception:
             return 0
-

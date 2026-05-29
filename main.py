@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
 
 from playwright.sync_api import sync_playwright
 
@@ -15,12 +16,16 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--url", required=True)
     parser.add_argument("--headless", action="store_true", default=False)
-    parser.add_argument("--output-dir", default=".")
+    parser.add_argument("--output-dir", default="reports")
     args = parser.parse_args()
 
     config = Settings()
     headless = args.headless or config.playwright_headless
     results = []
+
+    # Each run gets its own timestamped subfolder
+    run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_folder = f"{args.output_dir}/run_{run_timestamp}"
 
     with sync_playwright() as p:
         browser = p.chromium.launch(
@@ -49,8 +54,9 @@ def main() -> None:
 
     if results:
         reporter = ReportGenerator()
-        reporter.generate(results, output_dir=args.output_dir)
-        print(f"[Main] Report saved. Total test cases: {len(results)}")
+        reporter.generate(results, output_dir=run_folder, timestamp=run_timestamp)
+        print(f"[Main] All reports saved to: {run_folder}/")
+        print(f"[Main] Total test cases recorded: {len(results)}")
     else:
         print("[Main] No results to report.")
 
