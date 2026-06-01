@@ -18,6 +18,7 @@ class ReportGenerator:
         results: list[dict],
         output_dir: str = "reports",
         timestamp: str | None = None,
+        site_slug: str | None = None,
     ) -> None:
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
@@ -25,9 +26,12 @@ class ReportGenerator:
         if not timestamp:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-        csv_path  = output_path / f"report_{timestamp}.csv"
-        json_path = output_path / f"report_{timestamp}.json"
-        html_path = output_path / f"report_{timestamp}.html"
+        # Build descriptive file name
+        prefix = f"{site_slug}__{timestamp}" if site_slug else timestamp
+
+        csv_path  = output_path / f"{prefix}.csv"
+        json_path = output_path / f"{prefix}.json"
+        html_path = output_path / f"{prefix}.html"
 
         self._generate_csv(results, csv_path)
         self._generate_json(results, json_path, timestamp)

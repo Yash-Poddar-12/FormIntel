@@ -1,4 +1,4 @@
-"""Form filling utilities for FormIntel."""
+"""Form filling utilities for smart_form_tester."""
 
 from __future__ import annotations
 
@@ -6,10 +6,8 @@ from playwright.sync_api import Page
 
 
 class FormFiller:
-    """Fill detected fields with generated values."""
 
     def fill_all(self, page: Page, fields: list[dict], values: dict) -> dict:
-        """Fill all fields and return browser native validation messages per field index."""
         validation_messages: dict[str, str] = {}
 
         for field in fields:
@@ -30,10 +28,18 @@ class FormFiller:
                 continue
 
             try:
+                # --- Dismiss any open overlay/dropdown/calendar before each field ---
+                self._dismiss_overlays(page)
+
                 page.wait_for_selector(selector, state="visible", timeout=5000)
 
                 if field_type in {"text", "email", "tel", "number", "password", "textarea"}:
-                    page.locator(selector).fill("" if value is None else str(value))
+                    locator = page.locator(selector)
+                    locator.fill("" if value is None else str(value))
+
+                    # Check if this is an autocomplete/combobox — if dropdown opened, select first option
+                    page.wait_for_timeout(600)
+                    self._handle_autocomplete_dropdown(page, selector)
 
                 elif field_type in {"date", "datetime-local", "time", "month"}:
                     page.evaluate(
@@ -48,6 +54,10 @@ class FormFiller:
                         }""",
                         [selector, "" if value is None else str(value)],
                     )
+                    page.wait_for_timeout(400)
+                    # Close the calendar picker that opens after date fill
+                    page.keyboard.press("Escape")
+                    page.wait_for_timeout(300)
 
                 elif field_type == "select":
                     page.locator(selector).select_option("" if value is None else str(value))
@@ -80,7 +90,11 @@ class FormFiller:
                     else:
                         should_check = bool(value)
                     if should_check != current:
-                        locator.click()
+                        # Use JS click to avoid overlay interception
+                        page.evaluate(
+                            "(sel) => { const el = document.querySelector(sel); if(el) el.click(); }",
+                            selector
+                        )
 
                 elif field_type == "checkbox-group":
                     name = str(field.get("name", "")).strip()
@@ -123,6 +137,8 @@ class FormFiller:
                     page.keyboard.press("Control+A")
                     page.keyboard.press("Delete")
                     locator.type("" if value is None else str(value), delay=50)
+                    page.wait_for_timeout(600)
+                    self._handle_autocomplete_dropdown(page, selector)
 
                 else:
                     page.locator(selector).fill("" if value is None else str(value))
@@ -134,9 +150,99 @@ class FormFiller:
                 )
                 validation_messages[field_idx] = str(validation_message or "")
 
-            except Exception as exc:  # pylint: disable=broad-except
+            except Exception as exc:
                 print(f"[FormFiller] Error filling field {field_idx} ({label}): {exc}")
                 validation_messages[field_idx] = ""
+                # Try to dismiss any overlay that caused the failure before continuing
+                try:
+                    page.keyboard.press("Escape")
+                    page.wait_for_timeout(300)
+                except Exception:
+                    pass
                 continue
 
         return validation_messages
+
+    def _dismiss_overlays(self, page: Page) -> None:
+        """
+        Press Escape and click body to close any open:
+        - calendar date pickers
+        - autocomplete dropdowns
+        - React Select menus
+        - modal dialogs blocking clicks
+        """
+        try:
+            # Check if any dropdown/overlay is open before pressing Escape
+            overlay_open = page.evaluate("""() => {
+                const openSelectors = [
+                    '[class*="dropdown"][style*="display: block"]',
+                    '[class*="menu"][style*="display: block"]',
+                    '.react-datepicker-popper',
+                    '[class*="datepicker"]:not([style*="display: none"])',
+                    '[aria-expanded="true"]',
+                    '[class*="subjects-auto-complete__menu"]',
+                    '[class*="react-select__menu"]',
+                    '[class*="auto-complete"][class*="menu"]',
+                ];
+                return openSelectors.some(sel => {
+                    try { return document.querySelector(sel) !== null; }
+                    catch(_) { return false; }
+                });
+            }""")
+
+            if overlay_open:
+                page.keyboard.press("Escape")
+                page.wait_for_timeout(300)
+        except Exception:
+            pass
+
+    def _handle_autocomplete_dropdown(self, page: Page, selector: str) -> None:
+        """
+        After typing in a text/combobox field, if a dropdown appeared,
+        click the first option to select it and close the dropdown.
+        """
+        try:
+            # Check if an autocomplete dropdown opened
+            dropdown_visible = page.evaluate("""(sel) => {
+                const el = document.querySelector(sel);
+                if (!el) return false;
+                // Check aria-expanded
+                if (el.getAttribute('aria-expanded') === 'true') return true;
+                // Check for React Select menu near this element
+                const menu = document.querySelector(
+                    '[class*="auto-complete__menu"], [class*="react-select__menu"], ' +
+                    '[class*="subjects-auto-complete__menu"]'
+                );
+                return menu !== null;
+            }""", selector)
+
+            if dropdown_visible:
+                # Try clicking the first option in any open dropdown
+                clicked = page.evaluate("""() => {
+                    const optionSelectors = [
+                        '[class*="auto-complete__option"]:first-child',
+                        '[class*="react-select__option"]:first-child',
+                        '[class*="subjects-auto-complete__option"]:first-child',
+                        '[id*="react-select"][id*="option-0"]',
+                        '[role="option"]:first-child',
+                        '[class*="option--is-focused"]',
+                    ];
+                    for (const sel of optionSelectors) {
+                        const opt = document.querySelector(sel);
+                        if (opt) { opt.click(); return true; }
+                    }
+                    return false;
+                }""")
+
+                if not clicked:
+                    # Nothing to click — just close with Escape
+                    page.keyboard.press("Escape")
+
+                page.wait_for_timeout(400)
+
+        except Exception:
+            try:
+                page.keyboard.press("Escape")
+                page.wait_for_timeout(300)
+            except Exception:
+                pass
