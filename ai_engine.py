@@ -1,4 +1,4 @@
-"""AI engine for smart_form_tester.
+"""AI engine for FormIntel.
 
 Supports:
   - OpenAI  (gpt-4.1-mini recommended)

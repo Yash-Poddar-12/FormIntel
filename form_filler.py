@@ -1,4 +1,4 @@
-"""Form filling utilities for smart_form_tester.
+"""Form filling utilities for FormIntel.
 
 What this file does:
   - Fills every field type that Playwright can interact with

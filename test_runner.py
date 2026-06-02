@@ -1,4 +1,4 @@
-"""Core test orchestration for smart_form_tester.
+"""Core test orchestration for FormIntel.
 
 What this file does:
   PHASE 1 — Baseline Convergence:

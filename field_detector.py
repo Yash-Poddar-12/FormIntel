@@ -1,4 +1,4 @@
-"""DOM field detection for smart_form_tester.
+"""DOM field detection for FormIntel.
 
 What this file does:
   - Scans the page DOM using JavaScript executed inside the browser
