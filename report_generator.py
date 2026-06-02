@@ -101,6 +101,8 @@ class ReportGenerator:
                 "pass_reason":        row.get("pass_reason", ""),
                 "page_errors":        row.get("page_errors") or [],
                 "validation_messages":row.get("validation_messages") or {},
+                "alert_texts":        row.get("alert_texts", []),
+                "fill_verification":  row.get("fill_verification", {}),
                 "all_field_values":   row.get("all_values") or {},
                 "final_url":          row.get("url", ""),
                 "page_number":        row.get("page_number", 1),
@@ -128,6 +130,12 @@ class ReportGenerator:
                 "pass_reason":    row.get("pass_reason", ""),
                 "errors":         " | ".join(row.get("page_errors") or []) or "—",
                 "validation":     self._to_json_string(row.get("validation_messages") or {}),
+                "alert_texts_json": json.dumps(
+                    row.get("alert_texts") or [], indent=2, ensure_ascii=False
+                ),
+                "fill_verification_json": json.dumps(
+                    row.get("fill_verification") or {}, indent=2, ensure_ascii=False
+                ),
                 "url":            row.get("final_url", ""),
                 "page_number":    row.get("page_number", 1),
                 "all_values_json": json.dumps(
@@ -318,6 +326,14 @@ class ReportGenerator:
                 <pre class="mono">{{ row.validation }}</pre>
                 <h4 style="margin-top:14px;">Page Error Elements Detected</h4>
                 <pre class="mono">{{ row.errors }}</pre>
+              </div>
+              <div class="detail-section">
+                <h4>Alert Dialogs</h4>
+                <pre class="mono">{{ row.alert_texts_json }}</pre>
+              </div>
+              <div class="detail-section">
+                <h4>Fill Verification</h4>
+                <pre class="mono">{{ row.fill_verification_json }}</pre>
               </div>
             </div>
           </td>

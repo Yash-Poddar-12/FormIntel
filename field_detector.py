@@ -128,6 +128,22 @@ class FieldDetector:
       "datetime-local","time","month","range","file","hidden","radio","checkbox"]);
     return supported.has(t) ? t : "text";
   };
+  const isRequired = (el) => {
+    if (el.required) return true;
+    if (el.getAttribute("aria-required") === "true") return true;
+    const fieldset = el.closest("fieldset");
+    if (fieldset && fieldset.hasAttribute("required")) return true;
+    const label = getElementLabel(el);
+    if (label.includes("*")) return true;
+    return false;
+  };
+  const OTP_HINTS = ["otp", "one time", "one-time", "verification code", "verify code", "sms code", "passcode"];
+  const isOtp = (field, node) => {
+    const combined = [field.label, field.name, field.id,
+      toText(node.getAttribute("placeholder")),
+      toText(node.getAttribute("aria-label"))].join(" ").toLowerCase();
+    return OTP_HINTS.some(hint => combined.includes(hint));
+  };
   const fields = [];
   const radioGroups = new Map();
   const checkboxGroups = new Map();
@@ -161,12 +177,12 @@ class FieldDetector:
     const options = tag === "select"
       ? Array.from(node.options || []).map((opt) => [toText(opt.value), toText(opt.textContent)])
       : null;
-    fields.push({
+    const field = {
       type: baseType,
       label: getElementLabel(node),
       name: toText(node.getAttribute("name")),
       id: toText(node.id),
-      required: !!node.required || node.getAttribute("aria-required") === "true",
+      required: isRequired(node),
       min: toText(node.getAttribute("min")) || null,
       max: toText(node.getAttribute("max")) || null,
       step: toText(node.getAttribute("step")) || null,
@@ -174,7 +190,12 @@ class FieldDetector:
       options: options && options.length ? options : null,
       selector: buildUniqueSelector(node),
       skip: baseType === "file",
-    });
+    };
+    if (isOtp(field, node)) {
+      field.type = "otp";
+      field.skip = false;
+    }
+    fields.push(field);
   }
   for (const [, group] of radioGroups) {
     if (!group.elements || group.elements.length === 0) continue;
@@ -183,7 +204,7 @@ class FieldDetector:
     fields.push({
       type: "radio", label: getElementLabel(first),
       name: toText(first.getAttribute("name")), id: toText(first.id),
-      required: group.elements.some((el) => !!el.required || el.getAttribute("aria-required") === "true"),
+      required: group.elements.some((el) => isRequired(el)),
       min: null, max: null, step: null, pattern: null, options: options,
       selector: buildUniqueSelector(first), skip: false,
     });
@@ -198,7 +219,7 @@ class FieldDetector:
       fields.push({
         type: "checkbox", label: getElementLabel(single),
         name: toText(single.getAttribute("name")), id: toText(single.id),
-        required: !!single.required || single.getAttribute("aria-required") === "true",
+        required: isRequired(single),
         min: null, max: null, step: null, pattern: null, options: null,
         selector: buildUniqueSelector(single), skip: false,
       });
@@ -208,7 +229,7 @@ class FieldDetector:
       fields.push({
         type: "checkbox-group", label: getElementLabel(first),
         name: toText(first.getAttribute("name")), id: toText(first.id),
-        required: group.elements.some((el) => !!el.required || el.getAttribute("aria-required") === "true"),
+        required: group.elements.some((el) => isRequired(el)),
         min: null, max: null, step: null, pattern: null, options: options,
         selector: buildUniqueSelector(first), skip: false,
       });

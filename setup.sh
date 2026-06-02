@@ -23,9 +23,14 @@ playwright install chromium
 echo "Creating .env file..."
 cat > .env << 'EOF'
 GEMINI_API_KEY=your_key_here
+OPENAI_API_KEY=
+OPENAI_MODEL=gpt-4.1-mini
 PLAYWRIGHT_HEADLESS=false
 PLAYWRIGHT_SLOW_MO=700
 DEFAULT_TIMEOUT=30000
+REQUIRED_ONLY=false
+OTP_WAIT_SECONDS=180
+OTP_EXTRA_SECONDS=120
 EOF
 
 echo "Setup complete. Add your GEMINI_API_KEY to .env then run:"

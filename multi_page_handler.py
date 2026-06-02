@@ -8,61 +8,78 @@ from playwright.sync_api import Page
 
 
 class MultiPageHandler:
-    """Handle submit/next clicks and detect page state signals."""
 
-    def click_submit_or_next(self, page: Page) -> str:
-        """Click submit/next-like controls and classify result."""
+    def click_submit_or_next(self, page: Page) -> tuple[str, list[str]]:
+        """
+        Click submit/next-like controls and classify result.
+        Returns (result_string, captured_alert_texts).
+        """
         before_url = page.url
         before_form_count = page.locator("form").count()
         before_field_count = self._count_visible_field_elements(page)
 
+        # Set up dialog (alert/confirm/prompt) capture
+        captured_alerts: list[str] = []
+        def handle_dialog(dialog):
+            captured_alerts.append(dialog.message)
+            dialog.accept()
+        page.on("dialog", handle_dialog)
+
         clicked = False
         clicked_kind = "nothing_clicked"
 
-        # a) strict submit controls first
-        submit = page.locator("button[type=submit], input[type=submit]").first
-        if submit.count() > 0:
-            try:
-                if submit.is_visible() and submit.is_enabled():
-                    submit.click()
-                    clicked = True
-                    clicked_kind = "submitted"
-            except Exception as exc:
-                print(f"[MultiPageHandler] Submit click failed: {exc}")
-
-        # b) semantic next/continue style buttons
-        if not clicked:
-            texts = ["submit", "next", "continue", "proceed", "verify", "confirm"]
-            for text in texts:
+        try:
+            # a) strict submit controls first
+            submit = page.locator("button[type=submit], input[type=submit]").first
+            if submit.count() > 0:
                 try:
-                    button = page.get_by_role("button", name=re.compile(text, re.IGNORECASE)).first
-                    if button.count() > 0 and button.is_visible() and button.is_enabled():
-                        button.click()
+                    if submit.is_visible() and submit.is_enabled():
+                        submit.click()
                         clicked = True
-                        clicked_kind = "next_clicked" if text in {"next", "continue", "proceed"} else "submitted"
-                        break
+                        clicked_kind = "submitted"
                 except Exception as exc:
-                    print(f"[MultiPageHandler] Role button click failed for '{text}': {exc}")
+                    print(f"[MultiPageHandler] Submit click failed: {exc}")
 
-        # c) any visible enabled button fallback
-        if not clicked:
-            buttons = page.locator("button")
-            total = buttons.count()
-            for i in range(total):
-                try:
-                    btn = buttons.nth(i)
-                    if btn.is_visible() and btn.is_enabled():
-                        btn.click()
-                        clicked = True
-                        clicked_kind = "next_clicked"
-                        break
-                except Exception:
-                    continue
+            # b) semantic next/continue style buttons
+            if not clicked:
+                texts = ["submit", "next", "continue", "proceed", "verify", "confirm"]
+                for text in texts:
+                    try:
+                        button = page.get_by_role("button", name=re.compile(text, re.IGNORECASE)).first
+                        if button.count() > 0 and button.is_visible() and button.is_enabled():
+                            button.click()
+                            clicked = True
+                            clicked_kind = "next_clicked" if text in {"next", "continue", "proceed"} else "submitted"
+                            break
+                    except Exception as exc:
+                        print(f"[MultiPageHandler] Role button click failed for '{text}': {exc}")
 
-        if not clicked:
-            return "nothing_clicked"
+            # c) any visible enabled button fallback
+            if not clicked:
+                buttons = page.locator("button")
+                total = buttons.count()
+                for i in range(total):
+                    try:
+                        btn = buttons.nth(i)
+                        if btn.is_visible() and btn.is_enabled():
+                            btn.click()
+                            clicked = True
+                            clicked_kind = "next_clicked"
+                            break
+                    except Exception:
+                        continue
 
-        page.wait_for_timeout(3000)
+            if not clicked:
+                page.remove_listener("dialog", handle_dialog)
+                return "nothing_clicked", []
+
+            page.wait_for_timeout(3000)
+
+        finally:
+            try:
+                page.remove_listener("dialog", handle_dialog)
+            except Exception:
+                pass
 
         after_url = page.url
         after_form_count = page.locator("form").count()
@@ -73,27 +90,20 @@ class MultiPageHandler:
         new_fields_appeared = after_field_count > before_field_count
 
         if url_changed or form_disappeared or self.detect_success(page):
-            return "submitted"
+            return "submitted", captured_alerts
         if new_fields_appeared:
-            return "next_clicked"
-        return clicked_kind
+            return "next_clicked", captured_alerts
+        return clicked_kind, captured_alerts
 
     def detect_success(self, page: Page) -> bool:
-        """Detect likely successful submission state."""
         try:
             body_text = page.inner_text("body").lower()
         except Exception:
             body_text = ""
 
         success_keywords = [
-            "success",
-            "thank you",
-            "submitted",
-            "application number",
-            "reference number",
-            "congratulations",
-            "approved",
-            "received",
+            "success", "thank you", "submitted", "application number",
+            "reference number", "congratulations", "approved", "received",
         ]
         keyword_hit = any(word in body_text for word in success_keywords)
 
@@ -106,37 +116,104 @@ class MultiPageHandler:
 
     def detect_errors(self, page: Page) -> list[str]:
         """
-        Collect errors ONLY from visible error-flagged elements.
-        Does NOT scan body text keywords — avoids false FAILs on
-        real sites where page content contains words like 'error' or 'invalid'.
+        Collect errors from:
+        - CSS class-based error elements
+        - ARIA role="alert" elements
+        - aria-live regions
+        - toast/notification/snackbar/dialog elements
+        - Visible elements containing error-pattern text
         """
         errors: list[str] = []
         seen: set[str] = set()
 
-        selectors = (
+        def _add(text: str) -> None:
+            t = text.strip()
+            if t and t not in seen:
+                seen.add(t)
+                errors.append(t)
+
+        # 1) Classic CSS error classes
+        css_selectors = (
             ".error, .invalid, .field-error, .form-error, "
             "[class*='error-msg'], [class*='field-error'], "
             "[class*='validation-error'], [aria-invalid='true'], "
             ".ng-invalid.ng-touched, .is-invalid"
         )
         try:
-            nodes = page.locator(selectors)
-            total = nodes.count()
-            for i in range(total):
+            nodes = page.locator(css_selectors)
+            for i in range(nodes.count()):
                 try:
                     text = nodes.nth(i).inner_text().strip()
-                    if text and text not in seen:
-                        seen.add(text)
-                        errors.append(text)
+                    _add(text)
                 except Exception:
                     continue
         except Exception as exc:
-            print(f"[MultiPageHandler] Error locator scan failed: {exc}")
+            print(f"[MultiPageHandler] CSS error locator scan failed: {exc}")
+
+        # 2) ARIA role=alert
+        try:
+            alerts = page.locator("[role='alert']")
+            for i in range(alerts.count()):
+                try:
+                    if alerts.nth(i).is_visible():
+                        _add(alerts.nth(i).inner_text())
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+        # 3) aria-live regions
+        try:
+            live_regions = page.locator("[aria-live='assertive'], [aria-live='polite']")
+            for i in range(live_regions.count()):
+                try:
+                    if live_regions.nth(i).is_visible():
+                        text = live_regions.nth(i).inner_text().strip()
+                        if text:
+                            _add(text)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+        # 4) Toast / notification / snackbar / modal dialog
+        try:
+            toast_sel = ".toast, .notification, .snackbar, .alert-message, dialog[open]"
+            toasts = page.locator(toast_sel)
+            for i in range(toasts.count()):
+                try:
+                    if toasts.nth(i).is_visible():
+                        _add(toasts.nth(i).inner_text())
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+        # 5) Visible elements with error-pattern text (only if small, targeted elements)
+        ERROR_PATTERNS = [
+            "is invalid", "is incorrect", "is not valid",
+            "please enter", "cannot be", "does not match",
+            "invalid format", "required field", "field is required",
+        ]
+        try:
+            visible_text_nodes = page.locator("span, p, small, div.message, div.msg, label.error")
+            count = min(visible_text_nodes.count(), 50)  # cap to avoid scanning whole page
+            for i in range(count):
+                try:
+                    node = visible_text_nodes.nth(i)
+                    if not node.is_visible():
+                        continue
+                    text = node.inner_text().strip().lower()
+                    if any(pat in text for pat in ERROR_PATTERNS) and len(text) < 200:
+                        _add(node.inner_text().strip())
+                except Exception:
+                    continue
+        except Exception:
+            pass
 
         return errors
 
     def get_current_page_number(self, page: Page) -> int:
-        """Infer current step/page number from text or active step indicators."""
         try:
             body_text = page.inner_text("body")
         except Exception:
@@ -164,7 +241,6 @@ class MultiPageHandler:
         return 1
 
     def _count_visible_field_elements(self, page: Page) -> int:
-        """Count visible input-ish elements for page-transition heuristics."""
         script = """
         () => {
           const selectors = [
@@ -190,39 +266,3 @@ class MultiPageHandler:
             return int(value) if value is not None else 0
         except Exception:
             return 0
-    
-    def wait_for_otp_if_needed(self, page: Page, wait_seconds: int = 120) -> bool:
-        """
-        Detects if the page is showing an OTP/verification prompt.
-        If yes, pauses and waits for user to enter OTP manually.
-        Returns True if OTP page was detected.
-        """
-        try:
-            body = page.inner_text("body").lower()
-        except Exception:
-            return False
-
-        otp_keywords = ["otp", "one time", "verification code", "enter code", "verify mobile", "send otp"]
-        if not any(kw in body for kw in otp_keywords):
-            return False
-
-        print(f"\n{'='*60}")
-        print(f"OTP PAGE DETECTED")
-        print(f"Please enter the OTP in the browser window.")
-        print(f"Waiting {wait_seconds} seconds...")
-        print(f"{'='*60}\n")
-
-        # Wait in 10-second chunks and check if OTP page is gone
-        for i in range(0, wait_seconds, 10):
-            page.wait_for_timeout(10000)
-            try:
-                current_body = page.inner_text("body").lower()
-                if not any(kw in current_body for kw in otp_keywords):
-                    print("[OTP] User completed OTP. Continuing...")
-                    return True
-            except Exception:
-                break
-            print(f"[OTP] Still waiting... {wait_seconds - i - 10}s remaining")
-
-        print("[OTP] Wait time expired. Continuing anyway.")
-        return True
