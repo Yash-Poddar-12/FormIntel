@@ -190,3 +190,39 @@ class MultiPageHandler:
             return int(value) if value is not None else 0
         except Exception:
             return 0
+    
+    def wait_for_otp_if_needed(self, page: Page, wait_seconds: int = 120) -> bool:
+        """
+        Detects if the page is showing an OTP/verification prompt.
+        If yes, pauses and waits for user to enter OTP manually.
+        Returns True if OTP page was detected.
+        """
+        try:
+            body = page.inner_text("body").lower()
+        except Exception:
+            return False
+
+        otp_keywords = ["otp", "one time", "verification code", "enter code", "verify mobile"]
+        if not any(kw in body for kw in otp_keywords):
+            return False
+
+        print(f"\n{'='*60}")
+        print(f"OTP PAGE DETECTED")
+        print(f"Please enter the OTP in the browser window.")
+        print(f"Waiting {wait_seconds} seconds...")
+        print(f"{'='*60}\n")
+
+        # Wait in 10-second chunks and check if OTP page is gone
+        for i in range(0, wait_seconds, 10):
+            page.wait_for_timeout(10000)
+            try:
+                current_body = page.inner_text("body").lower()
+                if not any(kw in current_body for kw in otp_keywords):
+                    print("[OTP] User completed OTP. Continuing...")
+                    return True
+            except Exception:
+                break
+            print(f"[OTP] Still waiting... {wait_seconds - i - 10}s remaining")
+
+        print("[OTP] Wait time expired. Continuing anyway.")
+        return True

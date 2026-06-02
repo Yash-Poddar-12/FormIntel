@@ -61,6 +61,7 @@ def main() -> None:
     parser.add_argument("--url", required=True)
     parser.add_argument("--headless", action="store_true", default=False)
     parser.add_argument("--output-dir", default="reports")
+    parser.add_argument("--otp-wait", type=int, default=0)
     args = parser.parse_args()
 
     config = Settings()
