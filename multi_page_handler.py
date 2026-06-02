@@ -202,7 +202,7 @@ class MultiPageHandler:
         except Exception:
             return False
 
-        otp_keywords = ["otp", "one time", "verification code", "enter code", "verify mobile"]
+        otp_keywords = ["otp", "one time", "verification code", "enter code", "verify mobile", "send otp"]
         if not any(kw in body for kw in otp_keywords):
             return False
 
