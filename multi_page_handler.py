@@ -132,7 +132,7 @@ class MultiPageHandler:
         except Exception:
             forms_disappeared = False
 
-        return keyword_hit or forms_disappeared
+        return keyword_hit
 
     def detect_errors(self, page: Page) -> list[str]:
         """

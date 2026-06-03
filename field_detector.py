@@ -195,6 +195,14 @@ class FieldDetector:
       field.type = "otp";
       field.skip = false;
     }
+    // Detect React Select: combobox inputs are often hidden but need container-based filling.
+    if (field.type === "text" && node.getAttribute("role") === "combobox") {
+      const inputId = toText(node.id);
+      if (inputId.includes("react-select")) {
+        field.type = "react-select";
+        field.react_select_container = inputId.replace(/-input$/, "");
+      }
+    }
     fields.push(field);
   }
   for (const [, group] of radioGroups) {
@@ -367,6 +375,7 @@ class FieldDetector:
                     "options": field.get("options"),
                     "selector": str(field.get("selector", "")),
                     "skip": bool(field.get("skip", False)),
+                    "react_select_container": field.get("react_select_container"),
                 })
             return normalized
         except Exception as exc:
