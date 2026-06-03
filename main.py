@@ -46,6 +46,7 @@ def main() -> None:
     parser.add_argument("--output-dir", default="reports", help="Root folder for report output")
     parser.add_argument("--required-only", action="store_true", default=False,
                         help="Fill and test only required fields (skip optional fields)")
+    parser.add_argument("--data-file", default=None, help="Path to a CSV file with test data rows")
     args = parser.parse_args()
 
     config = Settings()
@@ -63,6 +64,7 @@ def main() -> None:
 
     print(f"[Main] Target        : {args.url}")
     print(f"[Main] Run ID        : {site_slug}__{run_timestamp}")
+    print(f"[Main] Mode: {'DATA FILE' if args.data_file else 'AI GENERATION'}")
     print(f"[Main] Required-only : {config.required_only}")
     print(f"[Main] Reports       : {run_folder}/")
 
@@ -74,7 +76,10 @@ def main() -> None:
 
         try:
             runner = TestRunner()
-            results = runner.run(args.url, page, config)
+            if args.data_file:
+                results = runner.run_with_data(args.url, page, config, args.data_file)
+            else:
+                results = runner.run(args.url, page, config)
         except Exception as exc:
             print(f"[Main] Test run interrupted: {exc}")
             print("[Main] Saving partial results...")

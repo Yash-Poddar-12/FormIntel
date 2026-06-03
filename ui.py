@@ -138,17 +138,7 @@ def run_formIntel(
 
 
 def build_ui():
-    with gr.Blocks(
-        title="FormIntel",
-        theme=gr.themes.Base(
-            primary_hue="blue",
-            neutral_hue="slate",
-        ),
-        css="""
-        .gradio-container { max-width: 900px !important; margin: auto; }
-        #title { text-align: center; margin-bottom: 10px; }
-        """
-    ) as demo:
+    with gr.Blocks(title="FormIntel") as demo:
         gr.Markdown("# 🧪 FormIntel\n**AI-powered web form validation tester**", elem_id="title")
 
         with gr.Row():
@@ -199,4 +189,9 @@ def build_ui():
 
 if __name__ == "__main__":
     ui = build_ui()
-    ui.launch(server_name="0.0.0.0", server_port=7860, share=False)
+    ui.launch(
+        server_name="0.0.0.0",
+        server_port=7860,
+        share=False,
+        theme=gr.themes.Base(primary_hue="blue", neutral_hue="slate"),
+    )

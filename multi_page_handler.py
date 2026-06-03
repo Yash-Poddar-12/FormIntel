@@ -9,10 +9,27 @@ from playwright.sync_api import Page
 
 class MultiPageHandler:
 
-    def click_submit_or_next(self, page: Page) -> tuple[str, list[str]]:
+    _STATIC_ASSET_PATTERN = re.compile(
+        r"\.(?:js|css|png|jpe?g|svg|woff2?|ico)(?:\?|#|$)",
+        re.IGNORECASE,
+    )
+
+    def capture_network_response(self, page: Page, timeout_ms: int = 5000) -> list[dict]:
+        """
+        Capture likely form/API responses for timeout_ms and return a compact list.
+        For submit flows, click_submit_or_next starts the listener before clicking.
+        """
+        captured, handler = self._start_network_capture(page)
+        try:
+            page.wait_for_timeout(timeout_ms)
+        finally:
+            self._remove_response_listener(page, handler)
+        return captured
+
+    def click_submit_or_next(self, page: Page) -> tuple[str, list[str], list[dict]]:
         """
         Click submit/next-like controls and classify result.
-        Returns (result_string, captured_alert_texts).
+        Returns (result_string, captured_alert_texts, captured_network_responses).
         """
         before_url = page.url
         before_form_count = page.locator("form").count()
@@ -25,6 +42,7 @@ class MultiPageHandler:
             dialog.accept()
         page.on("dialog", handle_dialog)
 
+        network_responses, response_handler = self._start_network_capture(page)
         clicked = False
         clicked_kind = "nothing_clicked"
 
@@ -71,7 +89,8 @@ class MultiPageHandler:
 
             if not clicked:
                 page.remove_listener("dialog", handle_dialog)
-                return "nothing_clicked", []
+                self._remove_response_listener(page, response_handler)
+                return "nothing_clicked", [], network_responses
 
             page.wait_for_timeout(3000)
 
@@ -80,6 +99,7 @@ class MultiPageHandler:
                 page.remove_listener("dialog", handle_dialog)
             except Exception:
                 pass
+            self._remove_response_listener(page, response_handler)
 
         after_url = page.url
         after_form_count = page.locator("form").count()
@@ -90,10 +110,10 @@ class MultiPageHandler:
         new_fields_appeared = after_field_count > before_field_count
 
         if url_changed or form_disappeared or self.detect_success(page):
-            return "submitted", captured_alerts
+            return "submitted", captured_alerts, network_responses
         if new_fields_appeared:
-            return "next_clicked", captured_alerts
-        return clicked_kind, captured_alerts
+            return "next_clicked", captured_alerts, network_responses
+        return clicked_kind, captured_alerts, network_responses
 
     def detect_success(self, page: Page) -> bool:
         try:
@@ -266,3 +286,41 @@ class MultiPageHandler:
             return int(value) if value is not None else 0
         except Exception:
             return 0
+
+    def _start_network_capture(self, page: Page):
+        captured: list[dict] = []
+
+        def handle_response(response):
+            if len(captured) >= 5:
+                return
+            try:
+                status_code = int(response.status)
+                if not (200 <= status_code <= 299 or 400 <= status_code <= 599):
+                    return
+
+                url = str(response.url or "")
+                if self._STATIC_ASSET_PATTERN.search(url):
+                    return
+
+                content_type = str(response.headers.get("content-type", "")).lower()
+                if "application/json" not in content_type and "text/html" not in content_type:
+                    return
+
+                response_text = response.text()
+                captured.append({
+                    "url": url,
+                    "status_code": status_code,
+                    "response_text": (response_text or "")[:500],
+                })
+            except Exception:
+                return
+
+        page.on("response", handle_response)
+        return captured, handle_response
+
+    @staticmethod
+    def _remove_response_listener(page: Page, handler) -> None:
+        try:
+            page.remove_listener("response", handler)
+        except Exception:
+            pass

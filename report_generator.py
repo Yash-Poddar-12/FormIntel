@@ -26,10 +26,9 @@ class ReportGenerator:
         if not timestamp:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-        # Build descriptive file name
         prefix = f"{site_slug}__{timestamp}" if site_slug else timestamp
 
-        csv_path  = output_path / f"{prefix}.csv"
+        csv_path = output_path / f"{prefix}.csv"
         json_path = output_path / f"{prefix}.json"
         html_path = output_path / f"{prefix}.html"
 
@@ -37,45 +36,61 @@ class ReportGenerator:
         self._generate_json(results, json_path, timestamp)
         self._generate_html_from_json(json_path, html_path)
 
-        print(f"[Report] CSV  → {csv_path}")
-        print(f"[Report] JSON → {json_path}")
-        print(f"[Report] HTML → {html_path}")
+        print(f"[Report] CSV  -> {csv_path}")
+        print(f"[Report] JSON -> {json_path}")
+        print(f"[Report] HTML -> {html_path}")
 
     def _generate_csv(self, results: list[dict], csv_path: Path) -> None:
+        has_match_columns = any("match" in row for row in results)
         with csv_path.open("w", newline="", encoding="utf-8") as file:
             writer = csv.writer(file)
-            writer.writerow([
+            headers = [
                 "Test Number",
                 "Test Name",
                 "Changed Field",
                 "Variation Type",
                 "Changed Value",
                 "Status",
+            ]
+            if has_match_columns:
+                headers.extend(["Expected Result", "Matches Expected"])
+            headers.extend([
                 "Pass/Fail Reason",
                 "Page Errors",
                 "Validation Messages",
                 "Final URL",
                 "Page Number",
             ])
+            writer.writerow(headers)
+
             for i, row in enumerate(results, start=1):
-                writer.writerow([
+                csv_row = [
                     i,
                     row.get("test_name", ""),
-                    row.get("changed_field") or "—",
+                    row.get("changed_field") or "-",
                     row.get("variation_type", ""),
                     self._to_json_string(row.get("changed_value")),
                     row.get("status", ""),
+                ]
+                if has_match_columns:
+                    match_value = row.get("match")
+                    csv_row.extend([
+                        row.get("expected", ""),
+                        "" if match_value is None else str(bool(match_value)),
+                    ])
+                csv_row.extend([
                     row.get("pass_reason", ""),
                     " | ".join(row.get("page_errors") or []),
                     self._to_json_string(row.get("validation_messages", {})),
                     row.get("url", ""),
                     row.get("page_number", 1),
                 ])
+                writer.writerow(csv_row)
 
     def _generate_json(self, results: list[dict], json_path: Path, timestamp: str) -> None:
-        total      = len(results)
-        pass_count  = sum(1 for r in results if str(r.get("status", "")).upper() == "PASS")
-        fail_count  = sum(1 for r in results if str(r.get("status", "")).upper() == "FAIL")
+        total = len(results)
+        pass_count = sum(1 for r in results if str(r.get("status", "")).upper() == "PASS")
+        fail_count = sum(1 for r in results if str(r.get("status", "")).upper() == "FAIL")
         error_count = total - pass_count - fail_count
 
         payload = {
@@ -91,22 +106,29 @@ class ReportGenerator:
         }
 
         for i, row in enumerate(results, start=1):
-            payload["results"].append({
-                "test_number":        i,
-                "test_name":          row.get("test_name", ""),
-                "changed_field":      row.get("changed_field") or None,
-                "variation_type":     row.get("variation_type", ""),
-                "changed_value":      row.get("changed_value"),
-                "status":             str(row.get("status", "")).upper(),
-                "pass_reason":        row.get("pass_reason", ""),
-                "page_errors":        row.get("page_errors") or [],
-                "validation_messages":row.get("validation_messages") or {},
-                "alert_texts":        row.get("alert_texts", []),
-                "fill_verification":  row.get("fill_verification", {}),
-                "all_field_values":   row.get("all_values") or {},
-                "final_url":          row.get("url", ""),
-                "page_number":        row.get("page_number", 1),
-            })
+            result_row = {
+                "test_number": i,
+                "test_name": row.get("test_name", ""),
+                "description": row.get("description", ""),
+                "changed_field": row.get("changed_field") or None,
+                "variation_type": row.get("variation_type", ""),
+                "changed_value": row.get("changed_value"),
+                "status": str(row.get("status", "")).upper(),
+                "pass_reason": row.get("pass_reason", ""),
+                "page_errors": row.get("page_errors") or [],
+                "validation_messages": row.get("validation_messages") or {},
+                "alert_texts": row.get("alert_texts", []),
+                "network_responses": row.get("network_responses", []),
+                "fill_verification": row.get("fill_verification", {}),
+                "all_field_values": row.get("all_values") or {},
+                "or_groups": row.get("or_groups", []),
+                "final_url": row.get("url", ""),
+                "page_number": row.get("page_number", 1),
+            }
+            for optional_key in ("expected", "match", "input_values", "matched_fields"):
+                if optional_key in row:
+                    result_row[optional_key] = row.get(optional_key)
+            payload["results"].append(result_row)
 
         json_path.write_text(
             json.dumps(payload, indent=2, ensure_ascii=False),
@@ -114,30 +136,45 @@ class ReportGenerator:
         )
 
     def _generate_html_from_json(self, json_path: Path, html_path: Path) -> None:
-        raw     = json.loads(json_path.read_text(encoding="utf-8"))
-        meta    = raw.get("meta", {})
+        raw = json.loads(json_path.read_text(encoding="utf-8"))
+        meta = raw.get("meta", {})
         results = raw.get("results", [])
+        has_match_columns = any("match" in row for row in results)
 
         rows = []
         for row in results:
+            match_value = row.get("match")
+            row_class = str(row.get("status", "")).lower()
+            if match_value is True:
+                row_class = "match"
+            elif match_value is False:
+                row_class = "mismatch"
+
             rows.append({
-                "test_number":    row.get("test_number"),
-                "test_name":      row.get("test_name", ""),
-                "changed_field":  row.get("changed_field") or "—",
+                "test_number": row.get("test_number"),
+                "test_name": row.get("test_name", ""),
+                "changed_field": row.get("changed_field") or "-",
                 "variation_type": row.get("variation_type", ""),
-                "changed_value":  self._to_json_string(row.get("changed_value")),
-                "status":         str(row.get("status", "")).upper(),
-                "pass_reason":    row.get("pass_reason", ""),
-                "errors":         " | ".join(row.get("page_errors") or []) or "—",
-                "validation":     self._to_json_string(row.get("validation_messages") or {}),
+                "changed_value": self._to_json_string(row.get("changed_value")),
+                "status": str(row.get("status", "")).upper(),
+                "expected": row.get("expected", "-"),
+                "match": match_value,
+                "match_badge": "MATCH &#10003;" if match_value is True else "MISMATCH &#10007;" if match_value is False else "-",
+                "row_class": row_class,
+                "pass_reason": row.get("pass_reason", ""),
+                "errors": " | ".join(row.get("page_errors") or []) or "-",
+                "validation": self._to_json_string(row.get("validation_messages") or {}),
                 "alert_texts_json": json.dumps(
                     row.get("alert_texts") or [], indent=2, ensure_ascii=False
+                ),
+                "network_responses_json": json.dumps(
+                    row.get("network_responses") or [], indent=2, ensure_ascii=False
                 ),
                 "fill_verification_json": json.dumps(
                     row.get("fill_verification") or {}, indent=2, ensure_ascii=False
                 ),
-                "url":            row.get("final_url", ""),
-                "page_number":    row.get("page_number", 1),
+                "url": row.get("final_url", ""),
+                "page_number": row.get("page_number", 1),
                 "all_values_json": json.dumps(
                     row.get("all_field_values") or {}, indent=2, ensure_ascii=False
                 ),
@@ -151,6 +188,8 @@ class ReportGenerator:
             error_count=meta.get("error_count", 0),
             pass_rate=meta.get("pass_rate_percent", 0),
             rows=rows,
+            has_match_columns=has_match_columns,
+            detail_colspan=10 if has_match_columns else 8,
             json_filename=json_path.name,
         )
         html_path.write_text(html, encoding="utf-8")
@@ -162,7 +201,7 @@ class ReportGenerator:
             return
         html_path = Path(output_dir) / json_path.name.replace(".json", ".html")
         self._generate_html_from_json(json_path, html_path)
-        print(f"[Report] HTML regenerated → {html_path}")
+        print(f"[Report] HTML regenerated -> {html_path}")
 
     @staticmethod
     def _to_json_string(value: Any, pretty: bool = False) -> str:
@@ -222,6 +261,8 @@ class ReportGenerator:
     tbody tr.main-row.pass{border-left:4px solid var(--green);}
     tbody tr.main-row.fail{border-left:4px solid var(--red);}
     tbody tr.main-row.error{border-left:4px solid var(--yellow);}
+    tbody tr.main-row.match{border-left:4px solid var(--green);background:rgba(34,197,94,.06);}
+    tbody tr.main-row.mismatch{border-left:4px solid var(--red);background:rgba(239,68,68,.07);}
     tbody td{padding:10px;font-size:13px;vertical-align:top;word-break:break-word;}
 
     .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:12px;}
@@ -230,12 +271,13 @@ class ReportGenerator:
     .badge.PASS{background:rgba(34,197,94,.15);color:#86efac;border:1px solid rgba(34,197,94,.35);}
     .badge.FAIL{background:rgba(239,68,68,.15);color:#fca5a5;border:1px solid rgba(239,68,68,.35);}
     .badge.ERROR{background:rgba(245,158,11,.15);color:#fcd34d;border:1px solid rgba(245,158,11,.35);}
+    .match-badge{display:inline-block;padding:3px 8px;border-radius:999px;font-size:11px;font-weight:700;}
+    .match-badge.ok{background:rgba(34,197,94,.18);color:#86efac;border:1px solid rgba(34,197,94,.35);}
+    .match-badge.bad{background:rgba(239,68,68,.18);color:#fca5a5;border:1px solid rgba(239,68,68,.35);}
 
     .vtag{display:inline-block;padding:2px 8px;border-radius:6px;font-size:11px;
           background:rgba(59,130,246,.15);color:#93c5fd;border:1px solid rgba(59,130,246,.3);
           font-family:ui-monospace,monospace;}
-
-    .reason{font-size:11px;color:var(--muted);margin-top:3px;}
 
     tr.detail-row{display:none;background:#111;}
     tr.detail-row.open{display:table-row;}
@@ -257,8 +299,8 @@ class ReportGenerator:
 <div class="wrap">
 
   <div class="header">
-    <h1>FormIntel — Test Report</h1>
-    <div class="sub">Generated: {{ generated_at }} &nbsp;·&nbsp;
+    <h1>FormIntel - Test Report</h1>
+    <div class="sub">Generated: {{ generated_at }} &nbsp;&middot;&nbsp;
       Source: <a href="{{ json_filename }}" style="color:#60a5fa;">{{ json_filename }}</a>
     </div>
   </div>
@@ -272,7 +314,7 @@ class ReportGenerator:
   </div>
 
   <div class="toolbar">
-    <input id="searchBox" type="text" placeholder="Search test name, field, variation type…"/>
+    <input id="searchBox" type="text" placeholder="Search test name, field, variation type..."/>
     <button class="filter-btn active" data-filter="ALL">All</button>
     <button class="filter-btn" data-filter="PASS">PASS</button>
     <button class="filter-btn" data-filter="FAIL">FAIL</button>
@@ -288,6 +330,10 @@ class ReportGenerator:
           <th>Changed Field</th>
           <th>Variation Type</th>
           <th>Invalid Value Used</th>
+          {% if has_match_columns %}
+          <th>Expected</th>
+          <th>Match</th>
+          {% endif %}
           <th>Status</th>
           <th>Reason</th>
           <th>URL</th>
@@ -295,9 +341,9 @@ class ReportGenerator:
       </thead>
       <tbody>
         {% for row in rows %}
-        <tr class="main-row {{ row.status | lower }}"
+        <tr class="main-row {{ row.row_class }}"
             data-status="{{ row.status }}"
-            data-search="{{ row.test_name }} {{ row.changed_field }} {{ row.variation_type }} {{ row.changed_value }}"
+            data-search="{{ row.test_name }} {{ row.changed_field }} {{ row.variation_type }} {{ row.changed_value }} {{ row.expected }} {{ row.match_badge }}"
             data-detail="detail-{{ row.test_number }}">
           <td>{{ row.test_number }}</td>
           <td class="mono" style="font-size:12px;">{{ row.test_name }}</td>
@@ -305,9 +351,19 @@ class ReportGenerator:
           <td>
             {% if row.variation_type %}
               <span class="vtag">{{ row.variation_type }}</span>
-            {% else %}—{% endif %}
+            {% else %}-{% endif %}
           </td>
           <td class="mono">{{ row.changed_value }}</td>
+          {% if has_match_columns %}
+          <td>{{ row.expected }}</td>
+          <td>
+            {% if row.match is sameas true %}
+              <span class="match-badge ok">{{ row.match_badge | safe }}</span>
+            {% elif row.match is sameas false %}
+              <span class="match-badge bad">{{ row.match_badge | safe }}</span>
+            {% else %}-{% endif %}
+          </td>
+          {% endif %}
           <td>
             <span class="badge {{ row.status }}">{{ row.status }}</span>
           </td>
@@ -315,7 +371,7 @@ class ReportGenerator:
           <td class="mono" style="font-size:11px;">{{ row.url }}</td>
         </tr>
         <tr id="detail-{{ row.test_number }}" class="detail-row">
-          <td colspan="8">
+          <td colspan="{{ detail_colspan }}">
             <div class="detail-inner">
               <div class="detail-section">
                 <h4>All Field Values Used in This Test</h4>
@@ -334,6 +390,10 @@ class ReportGenerator:
               <div class="detail-section">
                 <h4>Fill Verification</h4>
                 <pre class="mono">{{ row.fill_verification_json }}</pre>
+              </div>
+              <div class="detail-section">
+                <h4>Network Responses</h4>
+                <pre class="mono">{{ row.network_responses_json }}</pre>
               </div>
             </div>
           </td>
