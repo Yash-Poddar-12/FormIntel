@@ -266,7 +266,6 @@ class FieldDetector:
     let groupId = 0;
 
     // Step 1: Find all text nodes that contain exactly "OR"
-    // These are the visual separators between alternative fields
     const orElements = [];
     const walker = document.createTreeWalker(
         document.body,
@@ -278,22 +277,27 @@ class FieldDetector:
         const text = node.textContent.trim().toUpperCase();
         if (text === 'OR' || text === '/ OR /' || text === '- OR -') {
             const parent = node.parentElement;
-            // Skip if parent contains form inputs (it's not an OR separator)
             if (parent && !parent.querySelector('input, select, textarea')) {
                 orElements.push(parent);
             }
         }
     }
 
-    // Step 2: For each OR marker, find which detected fields are
-    // positioned before and after it (using bounding rect comparison)
+    // Step 2: For each OR marker, find fields that are spatially
+    // ADJACENT to it — within a tight proximity window.
+    // This prevents OR markers from accidentally capturing fields
+    // from other rows on the same page.
     for (const orEl of orElements) {
         const orRect = orEl.getBoundingClientRect();
-        // Skip invisible OR elements
         if (orRect.width === 0 && orRect.height === 0) continue;
 
         const orCenterX = orRect.left + orRect.width / 2;
         const orCenterY = orRect.top + orRect.height / 2;
+
+        // How far (px) a field centre may be from the OR marker to count as its neighbour.
+        // Horizontal rows: fields sit left/right within ~200px vertically of the marker.
+        // Vertical stacks: fields sit above/below within ~200px horizontally of the marker.
+        const PROXIMITY = 200;
 
         const beforeIndices = [];
         const afterIndices = [];
@@ -307,27 +311,28 @@ class FieldDetector:
             const elCenterX = rect.left + rect.width / 2;
             const elCenterY = rect.top + rect.height / 2;
 
-            // Horizontal layout: fields are left and right of OR text
-            const isHorizontal = Math.abs(elCenterY - orCenterY) < 80;
-            if (isHorizontal) {
-                if (elCenterX < orCenterX - 20) {
-                    beforeIndices.push(field.index);
-                } else if (elCenterX > orCenterX + 20) {
-                    afterIndices.push(field.index);
-                }
-            } else {
-                // Vertical layout: fields are above and below OR text
-                if (elCenterY < orCenterY - 20) {
-                    beforeIndices.push(field.index);
-                } else if (elCenterY > orCenterY + 20) {
-                    afterIndices.push(field.index);
-                }
+            const dX = Math.abs(elCenterX - orCenterX);
+            const dY = Math.abs(elCenterY - orCenterY);
+
+            // Horizontal layout: field and OR are on the same row (dY small),
+            // and field is within PROXIMITY pixels horizontally.
+            const isHorizontalNeighbour = dY < 80 && dX < PROXIMITY;
+
+            // Vertical layout: field and OR are in the same column (dX small),
+            // and field is within PROXIMITY pixels vertically.
+            const isVerticalNeighbour = dX < 200 && dY < PROXIMITY;
+
+            if (isHorizontalNeighbour) {
+                if (elCenterX < orCenterX - 20) beforeIndices.push(field.index);
+                else if (elCenterX > orCenterX + 20) afterIndices.push(field.index);
+            } else if (isVerticalNeighbour) {
+                if (elCenterY < orCenterY - 20) beforeIndices.push(field.index);
+                else if (elCenterY > orCenterY + 20) afterIndices.push(field.index);
             }
+            // Fields outside the proximity window are ignored for this OR marker.
         }
 
-        // Only create a group if we found fields on both sides
         if (beforeIndices.length > 0 && afterIndices.length > 0) {
-            // Build a human-readable description
             const beforeLabels = detectedFields
                 .filter(f => beforeIndices.includes(f.index))
                 .map(f => f.label).join(', ');

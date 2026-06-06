@@ -91,11 +91,15 @@ class FormFiller:
                     // Check for tags/multi-select autocomplete patterns
                     const name = (el.getAttribute('name') || el.getAttribute('id') || '').toLowerCase();
                     const placeholder = (el.getAttribute('placeholder') || '').toLowerCase();
+                    // Only match explicit subjects/tags/skills/interests field names
                     const isTagsName = name.includes('subjects') || name.includes('tags') || name.includes('skills') || name.includes('interests');
-                    const isTagsPlaceholder = placeholder.includes('add') || placeholder.includes('type to search') || placeholder.includes('select multiple');
-                    // Check if sibling/parent has a tag-removal button (x) indicating it's already a tags input
-                    const parent = el.closest('[class*="tag"], [class*="chip"], [class*="multi"]');
-                    return isTagsName || isTagsPlaceholder || parent !== null;
+                    // Only match very specific placeholder phrases — NOT generic "add" words
+                    // "add" alone is too broad (e.g. "Add mobile number" on Bajaj form)
+                    const isTagsPlaceholder = placeholder.includes('type to search') || placeholder.includes('select multiple');
+                    // Only match if the element is INSIDE a chip/tag container
+                    // (not just a Bootstrap multi-column parent which also uses class "multi")
+                    const chipParent = el.closest('[class*="tagsinput"], [class*="chips"], [class*="token"]');
+                    return isTagsName || isTagsPlaceholder || chipParent !== null;
                 }""", selector)
 
                 if is_tags_input and field_type == "text":
@@ -127,7 +131,30 @@ class FormFiller:
                     page.wait_for_timeout(300)
 
                 elif field_type == "select":
-                    page.locator(selector).select_option("" if value is None else str(value))
+                    target_value = "" if value is None else str(value)
+                    locator = page.locator(selector)
+                    try:
+                        locator.select_option(target_value)
+                    except Exception:
+                        # Exact value not in <option> list — try label match, then first non-empty option
+                        selected = page.evaluate(
+                            """([sel, val]) => {
+                                const el = document.querySelector(sel);
+                                if (!el) return false;
+                                const opts = Array.from(el.options).filter(o => o.value !== '' && !o.disabled);
+                                if (!opts.length) return false;
+                                // Try case-insensitive label match first
+                                const lower = val.toLowerCase();
+                                const byLabel = opts.find(o => o.text.toLowerCase().includes(lower) || lower.includes(o.text.toLowerCase()));
+                                const pick = byLabel || opts[0];
+                                el.value = pick.value;
+                                el.dispatchEvent(new Event('change', {bubbles: true}));
+                                return true;
+                            }""",
+                            [selector, target_value],
+                        )
+                        if not selected:
+                            print(f"[FormFiller] select fallback: no options available for {selector}")
 
                 elif field_type == "select-multiple":
                     if isinstance(value, list):
@@ -520,44 +547,77 @@ class FormFiller:
 
     def _handle_autocomplete_dropdown(self, page: Page, selector: str, intended_value: str) -> None:
         """
-        After typing, if a dropdown appeared, click first matching option.
-        Falls back to ArrowDown+Enter if click fails.
-        Then verifies the value actually stuck.
+        After typing, if a dropdown appeared FOR THIS SPECIFIC FIELD, click best matching option.
+        If no match found, clicks first available option (never leaves blank).
+        Falls back to ArrowDown+Enter if JS click fails.
+
+        Crucially: checks that the dropdown is anchored to this field, not some
+        other open menu elsewhere on the page (which caused textarea double-fill).
         """
         try:
             dropdown_visible = page.evaluate("""(sel) => {
                 const el = document.querySelector(sel);
                 if (!el) return false;
+
+                // 1. Field itself says it has an open dropdown
                 if (el.getAttribute('aria-expanded') === 'true') return true;
-                const menu = document.querySelector(
-                    '[class*="auto-complete__menu"], [class*="react-select__menu"], ' +
-                    '[class*="subjects-auto-complete__menu"]'
+
+                // 2. Field has aria-controls / aria-owns pointing to a listbox
+                const controlled = el.getAttribute('aria-controls') || el.getAttribute('aria-owns');
+                if (controlled) {
+                    const listbox = document.getElementById(controlled);
+                    if (listbox && listbox.offsetParent !== null) return true;
+                }
+
+                // 3. A dropdown menu is a SIBLING or DESCENDANT of the field's
+                //    direct parent container — not just anywhere on the page.
+                const container = el.closest(
+                    '[class*="auto-complete"], [class*="react-select"], ' +
+                    '[class*="subjects-auto-complete"], [class*="combobox"]'
                 );
-                return menu !== null;
+                if (container) {
+                    const menu = container.querySelector(
+                        '[class*="menu"], [class*="dropdown"], [role="listbox"]'
+                    );
+                    if (menu && menu.offsetParent !== null) return true;
+                }
+
+                return false;
             }""", selector)
 
             if not dropdown_visible:
                 return
 
-            # Try clicking first option
-            clicked = page.evaluate("""() => {
+            # Try clicking best matching option — fallback to first available if no match
+            clicked = page.evaluate("""(targetText) => {
                 const optionSelectors = [
-                    '[class*="auto-complete__option"]:first-child',
-                    '[class*="react-select__option"]:first-child',
-                    '[class*="subjects-auto-complete__option"]:first-child',
-                    '[id*="react-select"][id*="option-0"]',
-                    '[role="option"]:first-child',
+                    '[class*="auto-complete__option"]',
+                    '[class*="react-select__option"]',
+                    '[class*="subjects-auto-complete__option"]',
+                    '[id*="react-select"][id*="option"]',
+                    '[role="option"]',
                     '[class*="option--is-focused"]',
                 ];
+                let allOptions = [];
                 for (const sel of optionSelectors) {
-                    const opt = document.querySelector(sel);
-                    if (opt) { opt.click(); return true; }
+                    const nodes = Array.from(document.querySelectorAll(sel));
+                    if (nodes.length) { allOptions = nodes; break; }
                 }
-                return false;
-            }""")
+                if (!allOptions.length) return false;
+
+                // Try label match first
+                const lower = targetText.toLowerCase();
+                const match = allOptions.find(o => {
+                    const t = o.textContent.trim().toLowerCase();
+                    return t.includes(lower) || lower.includes(t);
+                });
+                // No match → pick first visible non-disabled option
+                const pick = match || allOptions[0];
+                pick.click();
+                return true;
+            }""", intended_value)
 
             if not clicked:
-                # Fallback: ArrowDown + Enter
                 page.keyboard.press("ArrowDown")
                 page.wait_for_timeout(300)
                 page.keyboard.press("Enter")
