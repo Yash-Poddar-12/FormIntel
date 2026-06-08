@@ -347,141 +347,235 @@ class FormFiller:
         return "OTP_TIMEOUT"
 
     def _dismiss_overlays(self, page: Page) -> None:
-        try:
-            overlay_open = page.evaluate("""() => {
-                const openSelectors = [
-                    '[class*="dropdown"][style*="display: block"]',
-                    '[class*="menu"][style*="display: block"]',
-                    '.react-datepicker-popper',
-                    '[class*="datepicker"]:not([style*="display: none"])',
-                    '[aria-expanded="true"]',
-                    '[class*="subjects-auto-complete__menu"]',
-                    '[class*="react-select__menu"]',
-                    '[class*="auto-complete"][class*="menu"]',
-                ];
-                return openSelectors.some(sel => {
-                    try { return document.querySelector(sel) !== null; }
-                    catch(_) { return false; }
-                });
-            }""")
-            if overlay_open:
+        """
+        Close any open dropdown/datepicker/autocomplete before filling the next field.
+        Presses Escape until no open overlay remains (or max 3 attempts).
+        """
+        for _ in range(3):
+            try:
+                overlay_open = page.evaluate("""() => {
+                    const openSelectors = [
+                        '[class*="dropdown"][style*="display: block"]',
+                        '[class*="menu"][style*="display: block"]',
+                        '.react-datepicker-popper',
+                        '[class*="datepicker"]:not([style*="display: none"])',
+                        '[class*="subjects-auto-complete__menu"]',
+                        '[class*="react-select__menu"]',
+                        '[class*="auto-complete"][class*="menu"]',
+                        '[role="listbox"]',
+                        '[role="option"]',
+                    ];
+                    return openSelectors.some(sel => {
+                        try {
+                            const el = document.querySelector(sel);
+                            return el !== null && el.offsetParent !== null;
+                        }
+                        catch(_) { return false; }
+                    });
+                }""")
+                if not overlay_open:
+                    break
                 page.keyboard.press("Escape")
                 page.wait_for_timeout(300)
-        except Exception:
-            pass
+            except Exception:
+                break
 
     def _fill_react_select(self, page: Page, selector: str, value: str) -> None:
-        try:
-            # Step 1: Click the container to open the dropdown
-            page.evaluate("""(sel) => {
-                const el = document.querySelector(sel);
-                if (!el) return false;
-                let parent = el.parentElement;
-                let best = null;
-                for (let i = 0; i < 8; i++) {
-                    if (!parent) break;
-                    const cls = parent.className || '';
-                    if (cls.includes('react-select__control') || cls.includes('select__control') ||
-                        cls.includes('control') || cls.includes('container') || cls.includes('select')) {
-                        best = parent;
-                    }
-                    parent = parent.parentElement;
-                }
-                (best || el).click();
-                return true;
-            }""", selector)
-            page.wait_for_timeout(500)
+        """
+        Fill a React Select dropdown. Three-strategy approach:
 
-            # Step 2: Read all currently visible options BEFORE typing anything
-            available_options = page.evaluate("""() => {
-                const optionEls = document.querySelectorAll('[role="option"], [class*="react-select__option"], [class*="select__option"]');
-                return Array.from(optionEls).map(el => el.textContent.trim()).filter(t => t.length > 0);
+        Strategy A — Full list match (dropdowns that show all options on open):
+            Click control → read all options → click best match or first.
+
+        Strategy B — Typed search (search-only dropdowns like DemoQA State/City):
+            Type first few chars → read filtered options → click match or first.
+            If still "No options": clear text, reopen, pick first available.
+
+        Strategy C — ArrowDown+Enter last resort.
+
+        Keyboard focus is always established via a real Playwright .click() BEFORE
+        any page.keyboard.type() call, so keystrokes go to the react-select input
+        and NOT to whatever field previously had focus (e.g. the address textarea).
+        """
+        def _read_options() -> list[str]:
+            return page.evaluate("""() => {
+                const sels = [
+                    '[role="option"]',
+                    '[class*="react-select__option"]',
+                    '[class*="select__option"]',
+                ];
+                for (const s of sels) {
+                    const nodes = Array.from(document.querySelectorAll(s));
+                    const texts = nodes.map(n => n.textContent.trim()).filter(t => t && t !== 'No options');
+                    if (texts.length) return texts;
+                }
+                return [];
             }""")
 
-            if available_options:
-                # Step 3: Find the best matching option from what's actually available
-                value_lower = value.lower()
-                best_match = None
-                best_score = -1
-                for opt in available_options:
-                    opt_lower = opt.lower()
-                    if opt_lower == value_lower:
-                        best_match = opt
-                        best_score = 100
-                        break
-                    elif value_lower in opt_lower or opt_lower in value_lower:
-                        score = 80
-                        if score > best_score:
-                            best_score = score
-                            best_match = opt
-                    else:
-                        # Word overlap
-                        v_words = set(value_lower.split())
-                        o_words = set(opt_lower.split())
-                        overlap = len(v_words & o_words)
-                        if overlap > 0 and overlap > best_score:
-                            best_score = overlap
-                            best_match = opt
+        def _click_option(target: str) -> bool:
+            """Click the option whose text best matches target. Returns True on success."""
+            return page.evaluate("""(target) => {
+                const sels = [
+                    '[role="option"]',
+                    '[class*="react-select__option"]',
+                    '[class*="select__option"]',
+                ];
+                let all = [];
+                for (const s of sels) {
+                    const nodes = Array.from(document.querySelectorAll(s));
+                    if (nodes.length) { all = nodes; break; }
+                }
+                if (!all.length) return false;
+                const tl = target.toLowerCase();
+                // Exact → substring → first
+                const exact  = all.find(o => o.textContent.trim().toLowerCase() === tl);
+                const substr = all.find(o => o.textContent.trim().toLowerCase().includes(tl) ||
+                                            tl.includes(o.textContent.trim().toLowerCase()));
+                const pick = exact || substr || all[0];
+                pick.click();
+                return true;
+            }""", target)
 
-                if best_match:
-                    # Click the matching option directly without typing
-                    clicked = page.evaluate("""(targetText) => {
-                        const optionEls = document.querySelectorAll('[role="option"], [class*="react-select__option"], [class*="select__option"]');
-                        for (const el of optionEls) {
-                            if (el.textContent.trim().toLowerCase() === targetText.toLowerCase()) {
-                                el.click();
-                                return true;
-                            }
-                        }
-                        return false;
-                    }""", best_match)
-                    if clicked:
-                        page.wait_for_timeout(400)
-                        return
+        def _best_match(options: list[str], target: str) -> str | None:
+            tl = target.lower()
+            # exact
+            for o in options:
+                if o.lower() == tl:
+                    return o
+            # substring
+            for o in options:
+                ol = o.lower()
+                if tl in ol or ol in tl:
+                    return o
+            # word overlap
+            tw = set(tl.split())
+            best, best_n = None, 0
+            for o in options:
+                n = len(tw & set(o.lower().split()))
+                if n > best_n:
+                    best_n, best = n, o
+            return best  # None if no overlap at all
 
-            # Step 4: No pre-loaded options or no match found — type to filter
-            if value:
-                page.keyboard.type(value[:4], delay=50)
-                page.wait_for_timeout(800)
-
-                # Try to click a matching option after filtering
-                clicked = page.evaluate("""(targetText) => {
-                    const optionEls = document.querySelectorAll('[role="option"], [class*="react-select__option"], [class*="option--is-focused"]');
-                    for (const el of optionEls) {
-                        const t = el.textContent.trim().toLowerCase();
-                        if (t.includes(targetText.toLowerCase().substring(0, 3))) {
-                            el.click();
+        try:
+            # ── Step 1: open the dropdown with a REAL Playwright click ──────────
+            # JS .click() opens the menu but does NOT transfer real keyboard focus.
+            # The real .click() via Playwright does both.
+            try:
+                # Try clicking the control/container (the visual dropdown button)
+                clicked_container = page.evaluate("""(sel) => {
+                    const el = document.querySelector(sel);
+                    if (!el) return false;
+                    let p = el.parentElement;
+                    for (let i = 0; i < 8; i++) {
+                        if (!p) break;
+                        const cls = p.className || '';
+                        if (cls.includes('__control') || cls.includes('__container')) {
+                            p.click();
                             return true;
                         }
+                        p = p.parentElement;
                     }
-                    // Fallback: click first visible option
-                    const first = document.querySelector('[role="option"]:first-child, [class*="react-select__option"]:first-child');
-                    if (first) { first.click(); return true; }
                     return false;
-                }""", value)
+                }""", selector)
+            except Exception:
+                clicked_container = False
 
-                if not clicked:
-                    page.keyboard.press("ArrowDown")
+            # Real Playwright click to transfer keyboard focus
+            try:
+                page.locator(selector).click(timeout=2000)
+            except Exception:
+                pass
+            page.wait_for_timeout(600)
+
+            # ── Strategy A: full list already visible ────────────────────────────
+            options_a = _read_options()
+            if options_a:
+                match = _best_match(options_a, value)
+                target = match if match else options_a[0]
+                if _click_option(target):
+                    page.wait_for_timeout(400)
+                    page.keyboard.press("Escape")
                     page.wait_for_timeout(300)
-                    page.keyboard.press("Enter")
+                    if not match:
+                        print(f"[FormFiller] ReactSelect: '{value}' not in options, picked first: '{target}'")
+                    return
 
+            # ── Strategy B: type to search ───────────────────────────────────────
+            # Keyboard focus is on the input (from real .click() above).
+            if value:
+                search_term = value[:4]
+                page.keyboard.type(search_term, delay=50)
+                page.wait_for_timeout(800)
+
+                options_b = _read_options()
+                if options_b:
+                    match = _best_match(options_b, value)
+                    target = match if match else options_b[0]
+                    if _click_option(target):
+                        page.wait_for_timeout(400)
+                        page.keyboard.press("Escape")
+                        page.wait_for_timeout(300)
+                        if not match:
+                            print(f"[FormFiller] ReactSelect: '{value}' not found after typing '{search_term}', picked first: '{target}'")
+                        return
+
+                # ── Strategy B2: typed text gave "No options" —
+                #    clear the text, reopen the dropdown, pick first available ────
+                print(f"[FormFiller] ReactSelect: no options after typing '{search_term}' for '{value}' — clearing and picking first available")
+                for _ in range(len(search_term) + 1):
+                    page.keyboard.press("Backspace")
+                page.wait_for_timeout(400)
+
+                # Reopen by clicking the dropdown indicator (▾ arrow button)
+                reopened = page.evaluate("""(sel) => {
+                    const el = document.querySelector(sel);
+                    if (!el) return false;
+                    let p = el.parentElement;
+                    for (let i = 0; i < 10; i++) {
+                        if (!p) break;
+                        // The dropdown indicator sits inside __control
+                        const indicator = p.querySelector(
+                            '[class*="__dropdown-indicator"], [class*="__indicator"]'
+                        );
+                        if (indicator) { indicator.click(); return true; }
+                        p = p.parentElement;
+                    }
+                    return false;
+                }""", selector)
+                page.wait_for_timeout(600)
+
+                options_c = _read_options()
+                if options_c:
+                    if _click_option(options_c[0]):
+                        page.wait_for_timeout(400)
+                        page.keyboard.press("Escape")
+                        page.wait_for_timeout(300)
+                        print(f"[FormFiller] ReactSelect: picked first available option '{options_c[0]}'")
+                        return
+
+            # ── Strategy C: ArrowDown + Enter last resort ────────────────────────
+            page.keyboard.press("ArrowDown")
+            page.wait_for_timeout(300)
+            page.keyboard.press("Enter")
             page.wait_for_timeout(400)
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(300)
 
-            # Step 5: Verify something was selected
+            # ── Verify ───────────────────────────────────────────────────────────
             displayed = page.evaluate("""(sel) => {
                 const el = document.querySelector(sel);
                 if (!el) return '';
-                let parent = el.parentElement;
+                let p = el.parentElement;
                 for (let i = 0; i < 8; i++) {
-                    if (!parent) break;
-                    const valueNode = parent.querySelector('[class*="__single-value"], [class*="__multi-value"]');
-                    if (valueNode) return valueNode.textContent || '';
-                    parent = parent.parentElement;
+                    if (!p) break;
+                    const v = p.querySelector('[class*="__single-value"], [class*="__multi-value"]');
+                    if (v) return v.textContent || '';
+                    p = p.parentElement;
                 }
                 return el.value || '';
             }""", selector)
             if value and not str(displayed).strip():
-                print(f"[FormFiller] WARNING: React Select value did not appear selected for {selector}")
+                print(f"[FormFiller] WARNING: ReactSelect — nothing selected for '{selector}' (wanted '{value}')")
 
         except Exception as exc:
             print(f"[FormFiller] React Select fill failed for {selector}: {exc}")
