@@ -1,0 +1,7 @@
+mobile,loan_ref,dob,pan,expected_result,description
+9876543210,,1985-07-15,,PASS,Mobile + DOB only
+,LN1234567890,,ABCPA1234Z,PASS,Loan ref + PAN only
+9876543210,LN1234567890,1985-07-15,ABCPA1234Z,PASS,All four fields
+0000000000,,1985-07-15,,FAIL,Invalid mobile
+9876543210,,2099-01-01,,FAIL,Future DOB
+,,,,FAIL,All empty

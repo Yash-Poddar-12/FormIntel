@@ -33,6 +33,9 @@ OPENAI_MODEL:         str  = os.getenv("OPENAI_MODEL", "gpt-4.1-mini").strip()
 PLAYWRIGHT_HEADLESS:  bool = _to_bool(os.getenv("PLAYWRIGHT_HEADLESS"), default=False)
 PLAYWRIGHT_SLOW_MO:   int  = _to_int(os.getenv("PLAYWRIGHT_SLOW_MO"), default=700)
 DEFAULT_TIMEOUT:      int  = _to_int(os.getenv("DEFAULT_TIMEOUT"), default=30000)
+REQUIRED_ONLY:        bool = _to_bool(os.getenv("REQUIRED_ONLY"), default=False)
+OTP_WAIT_SECONDS:     int  = _to_int(os.getenv("OTP_WAIT_SECONDS"), default=180)
+OTP_EXTRA_SECONDS:    int  = _to_int(os.getenv("OTP_EXTRA_SECONDS"), default=120)
 
 GEMINI_MODEL_NAME: str = "gemini-2.5-flash"
 SYSTEM_PROMPT: str = (
@@ -44,7 +47,6 @@ SYSTEM_PROMPT: str = (
 )
 MAX_CONVERGENCE_ITERATIONS: int = 5
 
-# Priority: OpenAI first (higher limits), then Gemini, then rule-based fallback
 if OPENAI_API_KEY:
     AI_PROVIDER = "openai"
 elif GEMINI_API_KEY:
@@ -59,6 +61,7 @@ elif AI_PROVIDER == "gemini":
     print(f"[Config] AI Provider    : GEMINI ({GEMINI_MODEL_NAME})")
 else:
     print("[Config] AI Provider    : FALLBACK (rule-based, no API key found)")
+print(f"[Config] Required-only  : {REQUIRED_ONLY}")
 
 
 @dataclass(frozen=True)
@@ -73,3 +76,6 @@ class Settings:
     gemini_model_name:          str  = GEMINI_MODEL_NAME
     system_prompt:              str  = SYSTEM_PROMPT
     max_convergence_iterations: int  = MAX_CONVERGENCE_ITERATIONS
+    required_only:              bool = REQUIRED_ONLY
+    otp_wait_seconds:           int  = OTP_WAIT_SECONDS
+    otp_extra_seconds:          int  = OTP_EXTRA_SECONDS

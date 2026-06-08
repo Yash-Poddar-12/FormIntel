@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+import time
+import re
 from playwright.sync_api import Page
 
 
 class FormFiller:
 
+    def __init__(self, otp_wait_seconds: int = 180, otp_extra_seconds: int = 120):
+        self.otp_wait_seconds = otp_wait_seconds
+        self.otp_extra_seconds = otp_extra_seconds
+
     def fill_all(self, page: Page, fields: list[dict], values: dict) -> dict:
+        """Fill all fields. Returns validation_messages dict."""
         validation_messages: dict[str, str] = {}
 
         for field in fields:
@@ -18,28 +25,93 @@ class FormFiller:
             value = values.get(field_idx)
 
             if field_type == "file" or field.get("skip"):
-                print(f"[FormFiller] Skipping file input: {label}")
-                validation_messages[field_idx] = ""
-                continue
+                if field_type != "otp":
+                    print(f"[FormFiller] Skipping file input: {label}")
+                    validation_messages[field_idx] = ""
+                    continue
 
             if not selector:
                 print(f"[FormFiller] Missing selector for field index {field_idx}")
                 validation_messages[field_idx] = ""
                 continue
 
-            try:
-                # --- Dismiss any open overlay/dropdown/calendar before each field ---
-                self._dismiss_overlays(page)
+            # --- OTP special handling ---
+            if field_type == "otp":
+                msg = self._wait_for_otp(page, selector, label)
+                validation_messages[field_idx] = msg
+                continue
 
-                page.wait_for_selector(selector, state="visible", timeout=5000)
+            try:
+                self._dismiss_overlays(page)
+                try:
+                    page.wait_for_selector(selector, state="visible", timeout=3000)
+                except Exception:
+                    # React Select and similar: input may be hidden; click the container to reveal it.
+                    try:
+                        page.evaluate("""(sel) => {
+                            const el = document.querySelector(sel);
+                            if (!el) return false;
+                            let parent = el.parentElement;
+                            for (let i = 0; i < 5; i++) {
+                                if (!parent) break;
+                                const cls = parent.className || '';
+                                if (cls.includes('control') || cls.includes('container') ||
+                                    cls.includes('select') || cls.includes('input-group')) {
+                                    parent.click();
+                                    return true;
+                                }
+                                parent = parent.parentElement;
+                            }
+                            el.click();
+                            return true;
+                        }""", selector)
+                        page.wait_for_timeout(500)
+                    except Exception:
+                        pass
+
+                is_react_select = page.evaluate("""(sel) => {
+                    const el = document.querySelector(sel);
+                    if (!el) return false;
+                    const cls = (el.className || '') + (el.getAttribute('id') || '');
+                    return cls.includes('react-select') ||
+                           (el.getAttribute('role') === 'combobox' && el.disabled);
+                }""", selector)
+
+                if is_react_select and field_type in {"text", "contenteditable", "react-select"}:
+                    self._fill_react_select(page, selector, str(value) if value else "")
+                    validation_messages[field_idx] = ""
+                    continue
+
+                is_tags_input = page.evaluate("""(sel) => {
+                    const el = document.querySelector(sel);
+                    if (!el) return false;
+                    // Already handled as react-select — skip
+                    const cls = (el.className || '') + (el.getAttribute('id') || '');
+                    if (cls.includes('react-select')) return false;
+                    // Check for tags/multi-select autocomplete patterns
+                    const name = (el.getAttribute('name') || el.getAttribute('id') || '').toLowerCase();
+                    const placeholder = (el.getAttribute('placeholder') || '').toLowerCase();
+                    // Only match explicit subjects/tags/skills/interests field names
+                    const isTagsName = name.includes('subjects') || name.includes('tags') || name.includes('skills') || name.includes('interests');
+                    // Only match very specific placeholder phrases — NOT generic "add" words
+                    // "add" alone is too broad (e.g. "Add mobile number" on Bajaj form)
+                    const isTagsPlaceholder = placeholder.includes('type to search') || placeholder.includes('select multiple');
+                    // Only match if the element is INSIDE a chip/tag container
+                    // (not just a Bootstrap multi-column parent which also uses class "multi")
+                    const chipParent = el.closest('[class*="tagsinput"], [class*="chips"], [class*="token"]');
+                    return isTagsName || isTagsPlaceholder || chipParent !== null;
+                }""", selector)
+
+                if is_tags_input and field_type == "text":
+                    self._fill_tags_autocomplete(page, selector, str(value) if value else "")
+                    validation_messages[field_idx] = ""
+                    continue
 
                 if field_type in {"text", "email", "tel", "number", "password", "textarea"}:
                     locator = page.locator(selector)
                     locator.fill("" if value is None else str(value))
-
-                    # Check if this is an autocomplete/combobox — if dropdown opened, select first option
-                    page.wait_for_timeout(600)
-                    self._handle_autocomplete_dropdown(page, selector)
+                    page.wait_for_timeout(800)  # increased from 600
+                    self._handle_autocomplete_dropdown(page, selector, str(value) if value else "")
 
                 elif field_type in {"date", "datetime-local", "time", "month"}:
                     page.evaluate(
@@ -55,12 +127,34 @@ class FormFiller:
                         [selector, "" if value is None else str(value)],
                     )
                     page.wait_for_timeout(400)
-                    # Close the calendar picker that opens after date fill
                     page.keyboard.press("Escape")
                     page.wait_for_timeout(300)
 
                 elif field_type == "select":
-                    page.locator(selector).select_option("" if value is None else str(value))
+                    target_value = "" if value is None else str(value)
+                    locator = page.locator(selector)
+                    try:
+                        locator.select_option(target_value)
+                    except Exception:
+                        # Exact value not in <option> list — try label match, then first non-empty option
+                        selected = page.evaluate(
+                            """([sel, val]) => {
+                                const el = document.querySelector(sel);
+                                if (!el) return false;
+                                const opts = Array.from(el.options).filter(o => o.value !== '' && !o.disabled);
+                                if (!opts.length) return false;
+                                // Try case-insensitive label match first
+                                const lower = val.toLowerCase();
+                                const byLabel = opts.find(o => o.text.toLowerCase().includes(lower) || lower.includes(o.text.toLowerCase()));
+                                const pick = byLabel || opts[0];
+                                el.value = pick.value;
+                                el.dispatchEvent(new Event('change', {bubbles: true}));
+                                return true;
+                            }""",
+                            [selector, target_value],
+                        )
+                        if not selected:
+                            print(f"[FormFiller] select fallback: no options available for {selector}")
 
                 elif field_type == "select-multiple":
                     if isinstance(value, list):
@@ -90,7 +184,6 @@ class FormFiller:
                     else:
                         should_check = bool(value)
                     if should_check != current:
-                        # Use JS click to avoid overlay interception
                         page.evaluate(
                             "(sel) => { const el = document.querySelector(sel); if(el) el.click(); }",
                             selector
@@ -114,8 +207,6 @@ class FormFiller:
                                 }""",
                                 [name, opt_value, opt_value in selected_values],
                             )
-                    else:
-                        print(f"[FormFiller] checkbox-group without name at field index {field_idx}")
 
                 elif field_type in {"range", "slider"}:
                     page.evaluate(
@@ -137,8 +228,8 @@ class FormFiller:
                     page.keyboard.press("Control+A")
                     page.keyboard.press("Delete")
                     locator.type("" if value is None else str(value), delay=50)
-                    page.wait_for_timeout(600)
-                    self._handle_autocomplete_dropdown(page, selector)
+                    page.wait_for_timeout(800)
+                    self._handle_autocomplete_dropdown(page, selector, str(value) if value else "")
 
                 else:
                     page.locator(selector).fill("" if value is None else str(value))
@@ -153,7 +244,6 @@ class FormFiller:
             except Exception as exc:
                 print(f"[FormFiller] Error filling field {field_idx} ({label}): {exc}")
                 validation_messages[field_idx] = ""
-                # Try to dismiss any overlay that caused the failure before continuing
                 try:
                     page.keyboard.press("Escape")
                     page.wait_for_timeout(300)
@@ -163,82 +253,485 @@ class FormFiller:
 
         return validation_messages
 
+    def verify_fills(self, page: Page, fields: list[dict], intended_values: dict) -> dict:
+        """
+        After fill_all(), read back actual DOM values and compare to intended.
+        Returns: {field_idx: {"intended": x, "actual": y, "stuck": bool}}
+        """
+        verification: dict[str, dict] = {}
+        for field in fields:
+            field_idx = str(field.get("index"))
+            field_type = str(field.get("type", "")).lower()
+            selector = str(field.get("selector", "")).strip()
+            label = str(field.get("label", ""))
+            intended = intended_values.get(field_idx)
+
+            if field_type in {"file", "radio", "checkbox", "checkbox-group", "range", "otp"} or field.get("skip"):
+                continue
+            if not selector:
+                continue
+
+            try:
+                actual = page.evaluate(
+                    """(sel) => {
+                        const el = document.querySelector(sel);
+                        if (!el) return null;
+                        if (el.tagName === 'SELECT') {
+                            return el.value;
+                        }
+                        if (el.getAttribute('contenteditable')) {
+                            return el.textContent || '';
+                        }
+                        return el.value !== undefined ? el.value : el.textContent || '';
+                    }""",
+                    selector
+                )
+                intended_str = "" if intended is None else str(intended)
+                actual_str = "" if actual is None else str(actual)
+                stuck = (intended_str == "" or actual_str.strip() != "")
+
+                if intended_str and not actual_str.strip():
+                    print(f"[FormFiller] WARNING: Field '{label}' (idx {field_idx}) value did not stick — "
+                          f"intended '{intended_str[:40]}', actual '{actual_str[:40]}'")
+                    stuck = False
+                else:
+                    stuck = True
+
+                verification[field_idx] = {
+                    "intended": intended_str,
+                    "actual": actual_str,
+                    "stuck": stuck,
+                }
+            except Exception:
+                pass
+
+        return verification
+
+    def _wait_for_otp(self, page: Page, selector: str, label: str) -> str:
+        """Wait for user to manually enter OTP. Polls until filled or timeout."""
+        print(f"\n{'='*60}")
+        print(f"[OTP] Waiting for manual OTP entry on field '{label}'.")
+        print(f"[OTP] You have {self.otp_wait_seconds // 60} minutes to enter the OTP.")
+        print(f"{'='*60}\n")
+
+        deadline = time.time() + self.otp_wait_seconds
+        while time.time() < deadline:
+            try:
+                val = page.evaluate(
+                    "(sel) => { const el = document.querySelector(sel); return el ? el.value : ''; }",
+                    selector
+                )
+                if val and str(val).strip():
+                    print(f"[OTP] OTP detected in field '{label}': {'*' * len(str(val))}")
+                    return ""
+            except Exception:
+                pass
+            time.sleep(5)
+
+        print(f"[OTP] Still waiting... {self.otp_extra_seconds // 60} more minute(s) remaining.")
+        extra_deadline = time.time() + self.otp_extra_seconds
+        while time.time() < extra_deadline:
+            try:
+                val = page.evaluate(
+                    "(sel) => { const el = document.querySelector(sel); return el ? el.value : ''; }",
+                    selector
+                )
+                if val and str(val).strip():
+                    print(f"[OTP] OTP detected in field '{label}'.")
+                    return ""
+            except Exception:
+                pass
+            time.sleep(5)
+
+        print(f"[OTP] Timed out waiting for OTP on field '{label}' — skipping.")
+        return "OTP_TIMEOUT"
+
     def _dismiss_overlays(self, page: Page) -> None:
         """
-        Press Escape and click body to close any open:
-        - calendar date pickers
-        - autocomplete dropdowns
-        - React Select menus
-        - modal dialogs blocking clicks
+        Close any open dropdown/datepicker/autocomplete before filling the next field.
+        Presses Escape until no open overlay remains (or max 3 attempts).
         """
-        try:
-            # Check if any dropdown/overlay is open before pressing Escape
-            overlay_open = page.evaluate("""() => {
-                const openSelectors = [
-                    '[class*="dropdown"][style*="display: block"]',
-                    '[class*="menu"][style*="display: block"]',
-                    '.react-datepicker-popper',
-                    '[class*="datepicker"]:not([style*="display: none"])',
-                    '[aria-expanded="true"]',
-                    '[class*="subjects-auto-complete__menu"]',
-                    '[class*="react-select__menu"]',
-                    '[class*="auto-complete"][class*="menu"]',
-                ];
-                return openSelectors.some(sel => {
-                    try { return document.querySelector(sel) !== null; }
-                    catch(_) { return false; }
-                });
-            }""")
-
-            if overlay_open:
+        for _ in range(3):
+            try:
+                overlay_open = page.evaluate("""() => {
+                    const openSelectors = [
+                        '[class*="dropdown"][style*="display: block"]',
+                        '[class*="menu"][style*="display: block"]',
+                        '.react-datepicker-popper',
+                        '[class*="datepicker"]:not([style*="display: none"])',
+                        '[class*="subjects-auto-complete__menu"]',
+                        '[class*="react-select__menu"]',
+                        '[class*="auto-complete"][class*="menu"]',
+                        '[role="listbox"]',
+                        '[role="option"]',
+                    ];
+                    return openSelectors.some(sel => {
+                        try {
+                            const el = document.querySelector(sel);
+                            return el !== null && el.offsetParent !== null;
+                        }
+                        catch(_) { return false; }
+                    });
+                }""")
+                if not overlay_open:
+                    break
                 page.keyboard.press("Escape")
                 page.wait_for_timeout(300)
-        except Exception:
-            pass
+            except Exception:
+                break
 
-    def _handle_autocomplete_dropdown(self, page: Page, selector: str) -> None:
+    def _fill_react_select(self, page: Page, selector: str, value: str) -> None:
         """
-        After typing in a text/combobox field, if a dropdown appeared,
-        click the first option to select it and close the dropdown.
+        Fill a React Select dropdown. Three-strategy approach:
+
+        Strategy A — Full list match (dropdowns that show all options on open):
+            Click control → read all options → click best match or first.
+
+        Strategy B — Typed search (search-only dropdowns like DemoQA State/City):
+            Type first few chars → read filtered options → click match or first.
+            If still "No options": clear text, reopen, pick first available.
+
+        Strategy C — ArrowDown+Enter last resort.
+
+        Keyboard focus is always established via a real Playwright .click() BEFORE
+        any page.keyboard.type() call, so keystrokes go to the react-select input
+        and NOT to whatever field previously had focus (e.g. the address textarea).
+        """
+        def _read_options() -> list[str]:
+            return page.evaluate("""() => {
+                const sels = [
+                    '[role="option"]',
+                    '[class*="react-select__option"]',
+                    '[class*="select__option"]',
+                ];
+                for (const s of sels) {
+                    const nodes = Array.from(document.querySelectorAll(s));
+                    const texts = nodes.map(n => n.textContent.trim()).filter(t => t && t !== 'No options');
+                    if (texts.length) return texts;
+                }
+                return [];
+            }""")
+
+        def _click_option(target: str) -> bool:
+            """Click the option whose text best matches target. Returns True on success."""
+            return page.evaluate("""(target) => {
+                const sels = [
+                    '[role="option"]',
+                    '[class*="react-select__option"]',
+                    '[class*="select__option"]',
+                ];
+                let all = [];
+                for (const s of sels) {
+                    const nodes = Array.from(document.querySelectorAll(s));
+                    if (nodes.length) { all = nodes; break; }
+                }
+                if (!all.length) return false;
+                const tl = target.toLowerCase();
+                // Exact → substring → first
+                const exact  = all.find(o => o.textContent.trim().toLowerCase() === tl);
+                const substr = all.find(o => o.textContent.trim().toLowerCase().includes(tl) ||
+                                            tl.includes(o.textContent.trim().toLowerCase()));
+                const pick = exact || substr || all[0];
+                pick.click();
+                return true;
+            }""", target)
+
+        def _best_match(options: list[str], target: str) -> str | None:
+            tl = target.lower()
+            # exact
+            for o in options:
+                if o.lower() == tl:
+                    return o
+            # substring
+            for o in options:
+                ol = o.lower()
+                if tl in ol or ol in tl:
+                    return o
+            # word overlap
+            tw = set(tl.split())
+            best, best_n = None, 0
+            for o in options:
+                n = len(tw & set(o.lower().split()))
+                if n > best_n:
+                    best_n, best = n, o
+            return best  # None if no overlap at all
+
+        try:
+            # ── Step 1: open the dropdown with a REAL Playwright click ──────────
+            # JS .click() opens the menu but does NOT transfer real keyboard focus.
+            # The real .click() via Playwright does both.
+            try:
+                # Try clicking the control/container (the visual dropdown button)
+                clicked_container = page.evaluate("""(sel) => {
+                    const el = document.querySelector(sel);
+                    if (!el) return false;
+                    let p = el.parentElement;
+                    for (let i = 0; i < 8; i++) {
+                        if (!p) break;
+                        const cls = p.className || '';
+                        if (cls.includes('__control') || cls.includes('__container')) {
+                            p.click();
+                            return true;
+                        }
+                        p = p.parentElement;
+                    }
+                    return false;
+                }""", selector)
+            except Exception:
+                clicked_container = False
+
+            # Real Playwright click to transfer keyboard focus
+            try:
+                page.locator(selector).click(timeout=2000)
+            except Exception:
+                pass
+            page.wait_for_timeout(600)
+
+            # ── Strategy A: full list already visible ────────────────────────────
+            options_a = _read_options()
+            if options_a:
+                match = _best_match(options_a, value)
+                target = match if match else options_a[0]
+                if _click_option(target):
+                    page.wait_for_timeout(400)
+                    page.keyboard.press("Escape")
+                    page.wait_for_timeout(300)
+                    if not match:
+                        print(f"[FormFiller] ReactSelect: '{value}' not in options, picked first: '{target}'")
+                    return
+
+            # ── Strategy B: type to search ───────────────────────────────────────
+            # Keyboard focus is on the input (from real .click() above).
+            if value:
+                search_term = value[:4]
+                page.keyboard.type(search_term, delay=50)
+                page.wait_for_timeout(800)
+
+                options_b = _read_options()
+                if options_b:
+                    match = _best_match(options_b, value)
+                    target = match if match else options_b[0]
+                    if _click_option(target):
+                        page.wait_for_timeout(400)
+                        page.keyboard.press("Escape")
+                        page.wait_for_timeout(300)
+                        if not match:
+                            print(f"[FormFiller] ReactSelect: '{value}' not found after typing '{search_term}', picked first: '{target}'")
+                        return
+
+                # ── Strategy B2: typed text gave "No options" —
+                #    clear the text, reopen the dropdown, pick first available ────
+                print(f"[FormFiller] ReactSelect: no options after typing '{search_term}' for '{value}' — clearing and picking first available")
+                for _ in range(len(search_term) + 1):
+                    page.keyboard.press("Backspace")
+                page.wait_for_timeout(400)
+
+                # Reopen by clicking the dropdown indicator (▾ arrow button)
+                reopened = page.evaluate("""(sel) => {
+                    const el = document.querySelector(sel);
+                    if (!el) return false;
+                    let p = el.parentElement;
+                    for (let i = 0; i < 10; i++) {
+                        if (!p) break;
+                        // The dropdown indicator sits inside __control
+                        const indicator = p.querySelector(
+                            '[class*="__dropdown-indicator"], [class*="__indicator"]'
+                        );
+                        if (indicator) { indicator.click(); return true; }
+                        p = p.parentElement;
+                    }
+                    return false;
+                }""", selector)
+                page.wait_for_timeout(600)
+
+                options_c = _read_options()
+                if options_c:
+                    if _click_option(options_c[0]):
+                        page.wait_for_timeout(400)
+                        page.keyboard.press("Escape")
+                        page.wait_for_timeout(300)
+                        print(f"[FormFiller] ReactSelect: picked first available option '{options_c[0]}'")
+                        return
+
+            # ── Strategy C: ArrowDown + Enter last resort ────────────────────────
+            page.keyboard.press("ArrowDown")
+            page.wait_for_timeout(300)
+            page.keyboard.press("Enter")
+            page.wait_for_timeout(400)
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(300)
+
+            # ── Verify ───────────────────────────────────────────────────────────
+            displayed = page.evaluate("""(sel) => {
+                const el = document.querySelector(sel);
+                if (!el) return '';
+                let p = el.parentElement;
+                for (let i = 0; i < 8; i++) {
+                    if (!p) break;
+                    const v = p.querySelector('[class*="__single-value"], [class*="__multi-value"]');
+                    if (v) return v.textContent || '';
+                    p = p.parentElement;
+                }
+                return el.value || '';
+            }""", selector)
+            if value and not str(displayed).strip():
+                print(f"[FormFiller] WARNING: ReactSelect — nothing selected for '{selector}' (wanted '{value}')")
+
+        except Exception as exc:
+            print(f"[FormFiller] React Select fill failed for {selector}: {exc}")
+            try:
+                page.keyboard.press("Escape")
+                page.wait_for_timeout(300)
+            except Exception:
+                pass
+
+    def _fill_tags_autocomplete(self, page: Page, selector: str, value_string: str) -> None:
+        terms = [term.strip() for term in value_string.split(",") if term.strip()]
+        for term in terms:
+            try:
+                page.locator(selector).click()
+                # Type first 3 chars to trigger options
+                page.keyboard.type(term[:3], delay=50)
+                page.wait_for_timeout(800)
+
+                # Read available options and find best match
+                available = page.evaluate("""() => {
+                    const opts = document.querySelectorAll('[role="option"], [class*="option"]:not([class*="option--is-disabled"])');
+                    return Array.from(opts).map(el => el.textContent.trim()).filter(t => t.length > 0).slice(0, 20);
+                }""")
+
+                best_option = None
+                if available:
+                    term_lower = term.lower()
+                    for opt in available:
+                        if term_lower in opt.lower() or opt.lower() in term_lower:
+                            best_option = opt
+                            break
+                    if not best_option:
+                        best_option = available[0]  # take first if no partial match
+
+                if best_option:
+                    clicked = page.evaluate("""(targetText) => {
+                        const opts = document.querySelectorAll('[role="option"], [class*="option"]');
+                        for (const el of opts) {
+                            if (el.textContent.trim().toLowerCase().includes(targetText.toLowerCase())) {
+                                el.click();
+                                return true;
+                            }
+                        }
+                        return false;
+                    }""", best_option[:10])  # use first 10 chars to match
+                    if not clicked:
+                        page.keyboard.press("ArrowDown")
+                        page.wait_for_timeout(200)
+                        page.keyboard.press("Enter")
+                else:
+                    # No options appeared — skip this term
+                    page.keyboard.press("Escape")
+                    continue
+
+                page.wait_for_timeout(300)
+            except Exception as exc:
+                print(f"[FormFiller] Tags autocomplete term skipped for '{term}': {exc}")
+                try:
+                    page.keyboard.press("Escape")
+                    page.wait_for_timeout(300)
+                except Exception:
+                    pass    
+
+    def _handle_autocomplete_dropdown(self, page: Page, selector: str, intended_value: str) -> None:
+        """
+        After typing, if a dropdown appeared FOR THIS SPECIFIC FIELD, click best matching option.
+        If no match found, clicks first available option (never leaves blank).
+        Falls back to ArrowDown+Enter if JS click fails.
+
+        Crucially: checks that the dropdown is anchored to this field, not some
+        other open menu elsewhere on the page (which caused textarea double-fill).
         """
         try:
-            # Check if an autocomplete dropdown opened
             dropdown_visible = page.evaluate("""(sel) => {
                 const el = document.querySelector(sel);
                 if (!el) return false;
-                // Check aria-expanded
+
+                // 1. Field itself says it has an open dropdown
                 if (el.getAttribute('aria-expanded') === 'true') return true;
-                // Check for React Select menu near this element
-                const menu = document.querySelector(
-                    '[class*="auto-complete__menu"], [class*="react-select__menu"], ' +
-                    '[class*="subjects-auto-complete__menu"]'
+
+                // 2. Field has aria-controls / aria-owns pointing to a listbox
+                const controlled = el.getAttribute('aria-controls') || el.getAttribute('aria-owns');
+                if (controlled) {
+                    const listbox = document.getElementById(controlled);
+                    if (listbox && listbox.offsetParent !== null) return true;
+                }
+
+                // 3. A dropdown menu is a SIBLING or DESCENDANT of the field's
+                //    direct parent container — not just anywhere on the page.
+                const container = el.closest(
+                    '[class*="auto-complete"], [class*="react-select"], ' +
+                    '[class*="subjects-auto-complete"], [class*="combobox"]'
                 );
-                return menu !== null;
+                if (container) {
+                    const menu = container.querySelector(
+                        '[class*="menu"], [class*="dropdown"], [role="listbox"]'
+                    );
+                    if (menu && menu.offsetParent !== null) return true;
+                }
+
+                return false;
             }""", selector)
 
-            if dropdown_visible:
-                # Try clicking the first option in any open dropdown
-                clicked = page.evaluate("""() => {
-                    const optionSelectors = [
-                        '[class*="auto-complete__option"]:first-child',
-                        '[class*="react-select__option"]:first-child',
-                        '[class*="subjects-auto-complete__option"]:first-child',
-                        '[id*="react-select"][id*="option-0"]',
-                        '[role="option"]:first-child',
-                        '[class*="option--is-focused"]',
-                    ];
-                    for (const sel of optionSelectors) {
-                        const opt = document.querySelector(sel);
-                        if (opt) { opt.click(); return true; }
-                    }
-                    return false;
-                }""")
+            if not dropdown_visible:
+                return
 
-                if not clicked:
-                    # Nothing to click — just close with Escape
-                    page.keyboard.press("Escape")
+            # Try clicking best matching option — fallback to first available if no match
+            clicked = page.evaluate("""(targetText) => {
+                const optionSelectors = [
+                    '[class*="auto-complete__option"]',
+                    '[class*="react-select__option"]',
+                    '[class*="subjects-auto-complete__option"]',
+                    '[id*="react-select"][id*="option"]',
+                    '[role="option"]',
+                    '[class*="option--is-focused"]',
+                ];
+                let allOptions = [];
+                for (const sel of optionSelectors) {
+                    const nodes = Array.from(document.querySelectorAll(sel));
+                    if (nodes.length) { allOptions = nodes; break; }
+                }
+                if (!allOptions.length) return false;
 
+                // Try label match first
+                const lower = targetText.toLowerCase();
+                const match = allOptions.find(o => {
+                    const t = o.textContent.trim().toLowerCase();
+                    return t.includes(lower) || lower.includes(t);
+                });
+                // No match → pick first visible non-disabled option
+                const pick = match || allOptions[0];
+                pick.click();
+                return true;
+            }""", intended_value)
+
+            if not clicked:
+                page.keyboard.press("ArrowDown")
+                page.wait_for_timeout(300)
+                page.keyboard.press("Enter")
+
+            page.wait_for_timeout(500)
+
+            # Verify value stuck after dropdown selection
+            actual = page.evaluate(
+                "(sel) => { const el = document.querySelector(sel); return el ? (el.value || el.textContent || '') : ''; }",
+                selector
+            )
+            if not str(actual).strip() and intended_value:
+                print(f"[FormFiller] Autocomplete value did not stick after dropdown select. "
+                      f"Trying ArrowDown+Enter fallback.")
+                page.locator(selector).click()
+                page.wait_for_timeout(300)
+                page.keyboard.press("ArrowDown")
                 page.wait_for_timeout(400)
+                page.keyboard.press("Enter")
+                page.wait_for_timeout(500)
 
         except Exception:
             try:

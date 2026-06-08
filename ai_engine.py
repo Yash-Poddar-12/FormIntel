@@ -377,7 +377,7 @@ Page text (first 3000 chars):
             text  = "\n".join(lines).strip()
         try:
             return json.loads(text)
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as original_error:
             for start, end in [("{", "}"), ("[", "]")]:
                 s = text.find(start)
                 e = text.rfind(end)
@@ -386,7 +386,17 @@ Page text (first 3000 chars):
                         return json.loads(text[s: e + 1])
                     except Exception:
                         pass
-            raise
+
+            # Final repair: try to fix common JSON issues.
+            try:
+                import re as _re
+                repaired = _re.sub(r",\s*([}\]])", r"\1", text)
+                repaired = repaired.replace("'", '"')
+                return json.loads(repaired)
+            except Exception:
+                pass
+
+            raise original_error
 
     # ------------------------------------------------------------------
     # Rule-based Fallbacks (used when no AI available)

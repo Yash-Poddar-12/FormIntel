@@ -33,9 +33,14 @@ if errorlevel 1 (
 echo Creating .env file...
 (
   echo GEMINI_API_KEY=your_key_here
+  echo OPENAI_API_KEY=
+  echo OPENAI_MODEL=gpt-4.1-mini
   echo PLAYWRIGHT_HEADLESS=false
   echo PLAYWRIGHT_SLOW_MO=700
   echo DEFAULT_TIMEOUT=30000
+  echo REQUIRED_ONLY=false
+  echo OTP_WAIT_SECONDS=180
+  echo OTP_EXTRA_SECONDS=120
 ) > .env
 
 echo Setup complete. Add your GEMINI_API_KEY to .env then run:
