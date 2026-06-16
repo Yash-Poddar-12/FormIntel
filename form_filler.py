@@ -251,7 +251,108 @@ class FormFiller:
                     pass
                 continue
 
+        # ── Post-fill rescan: pick up dependent dropdowns that became visible ──
+        # Example: DemoQA City dropdown only appears after State is selected.
+        # These were invisible during the initial detect() so they weren't in `fields`.
+        self._fill_newly_visible_react_selects(page, fields, values)
+
         return validation_messages
+
+    def _fill_newly_visible_react_selects(
+        self, page: Page, already_filled_fields: list[dict], values: dict
+    ) -> None:
+        """
+        After filling all known fields, scan for react-select inputs that are NOW
+        visible but were not in the original field list (dependent dropdowns like
+        DemoQA's City which only appears after State is selected).
+
+        Matches each new input to a value by label similarity against the values
+        dict keys, then fills it using _fill_react_select.
+        """
+        page.wait_for_timeout(600)
+
+        already_selectors = {str(f.get("selector", "")) for f in already_filled_fields}
+
+        # Find all visible react-select inputs on the page not already filled
+        new_selects = page.evaluate("""(alreadySelectors) => {
+            const results = [];
+            const inputs = Array.from(document.querySelectorAll('input[role="combobox"]'));
+            for (const el of inputs) {
+                const cls = (el.className || '') + (el.getAttribute('id') || '');
+                if (!cls.includes('react-select') && !cls.includes('select')) continue;
+
+                // Build selector: prefer id
+                let sel = '';
+                if (el.id) sel = '#' + el.id;
+                else if (el.getAttribute('name')) sel = '[name="' + el.getAttribute('name') + '"]';
+                else continue;
+
+                if (alreadySelectors.includes(sel)) continue;
+
+                // Must be visible
+                const rect = el.getBoundingClientRect();
+                if (rect.width === 0 || rect.height === 0) continue;
+                const style = window.getComputedStyle(el);
+                if (style.display === 'none' || style.visibility === 'hidden') continue;
+
+                // Read label from aria-label or placeholder
+                const label = (el.getAttribute('aria-label') || el.getAttribute('placeholder') || '').toLowerCase();
+
+                // Check if already has a value selected (single-value span present)
+                let parent = el.parentElement;
+                let hasValue = false;
+                for (let i = 0; i < 8; i++) {
+                    if (!parent) break;
+                    const sv = parent.querySelector('[class*="__single-value"]');
+                    if (sv && sv.textContent.trim()) { hasValue = true; break; }
+                    parent = parent.parentElement;
+                }
+                if (hasValue) continue;
+
+                results.push({ selector: sel, label: label });
+            }
+            return results;
+        }""", list(already_selectors))
+
+        if not new_selects:
+            return
+
+        print(f"[FormFiller] Post-fill rescan found {len(new_selects)} newly visible react-select(s)")
+
+        for item in new_selects:
+            sel = item.get("selector", "")
+            label_hint = item.get("label", "")
+            if not sel:
+                continue
+
+            # Find the best matching value from the values dict by label similarity
+            best_value = ""
+            best_score = -1
+            for key, val in values.items():
+                if val is None:
+                    continue
+                key_lower = str(key).lower().replace("_", " ")
+                label_lower = label_hint.lower()
+                score = 0
+                if key_lower == label_lower:
+                    score = 100
+                elif key_lower in label_lower or label_lower in key_lower:
+                    score = 80
+                else:
+                    kw = set(key_lower.split())
+                    lw = set(label_lower.split())
+                    overlap = len(kw & lw)
+                    if overlap:
+                        score = 50 + overlap
+                if score > best_score:
+                    best_score = score
+                    best_value = str(val)
+
+            print(f"[FormFiller] Filling newly visible react-select '{sel}' (label='{label_hint}') with '{best_value}'")
+            try:
+                self._fill_react_select(page, sel, best_value)
+            except Exception as exc:
+                print(f"[FormFiller] Post-fill react-select failed for {sel}: {exc}")
 
     def verify_fills(self, page: Page, fields: list[dict], intended_values: dict) -> dict:
         """
@@ -269,6 +370,18 @@ class FormFiller:
             if field_type in {"file", "radio", "checkbox", "checkbox-group", "range", "otp"} or field.get("skip"):
                 continue
             if not selector:
+                continue
+
+            # React-select inputs always have .value === "" — the selected value lives
+            # in the __single-value span, not the input. Skip them in verification to
+            # avoid false "value did not stick" warnings.
+            is_react = page.evaluate("""(sel) => {
+                const el = document.querySelector(sel);
+                if (!el) return false;
+                const cls = (el.className || '') + (el.getAttribute('id') || '');
+                return cls.includes('react-select') || el.getAttribute('role') === 'combobox';
+            }""", selector)
+            if is_react:
                 continue
 
             try:
