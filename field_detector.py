@@ -144,6 +144,47 @@ class FieldDetector:
       toText(node.getAttribute("aria-label"))].join(" ").toLowerCase();
     return OTP_HINTS.some(hint => combined.includes(hint));
   };
+
+  // ── Visibility filter ──────────────────────────────────────────────────
+  // Returns true if the element is actually rendered and visible on screen.
+  const isVisible = (el) => {
+    if (!el) return false;
+    // offsetParent is null for display:none elements (and position:fixed in some browsers)
+    // but we also check getBoundingClientRect for zero-size elements.
+    if (el.offsetParent === null) {
+      // position:fixed elements have null offsetParent but may still be visible
+      const style = window.getComputedStyle(el);
+      if (style.position !== 'fixed') return false;
+    }
+    const rect = el.getBoundingClientRect();
+    if (rect.width === 0 && rect.height === 0) return false;
+    const style = window.getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+    return true;
+  };
+
+  // ── Noise container filter ─────────────────────────────────────────────
+  // Returns true if the element lives inside a known non-form area:
+  // nav, header, footer, cookie banners, login popovers, newsletter widgets.
+  const NOISE_SELECTORS = [
+    'nav', 'header', 'footer',
+    '[role="navigation"]', '[role="banner"]', '[role="contentinfo"]',
+    '[class*="cookie"]', '[class*="consent"]', '[class*="gdpr"]',
+    '[class*="newsletter"]', '[class*="subscribe"]',
+    '[class*="login-modal"]', '[class*="signin-modal"]', '[class*="auth-modal"]',
+    '[class*="search-bar"]', '[class*="searchbar"]', '[class*="site-search"]',
+    '[id*="cookie"]', '[id*="consent"]', '[id*="newsletter"]',
+    '[id*="login-modal"]', '[id*="signin"]',
+    '[class*="loyalty"]', '[class*="promo"]', '[class*="popup"]',
+    '[class*="overlay"]:not([class*="form"])',
+  ];
+  const isInNoiseContainer = (el) => {
+    return NOISE_SELECTORS.some(sel => {
+      try { return el.closest(sel) !== null; }
+      catch(_) { return false; }
+    });
+  };
+
   const fields = [];
   const radioGroups = new Map();
   const checkboxGroups = new Map();
@@ -152,6 +193,10 @@ class FieldDetector:
     'input, select, textarea, div[contenteditable], div[contenteditable="true"]'
   ));
   for (const node of nodes) {
+    // Skip invisible elements — catches CSS-hidden inputs, collapsed sections, etc.
+    if (!isVisible(node)) continue;
+    // Skip elements inside nav, header, footer, cookie banners, login popovers, etc.
+    if (isInNoiseContainer(node)) continue;
     const tag = node.tagName.toLowerCase();
     if (tag === "input") {
       const inputType = normalizeInputType(node.getAttribute("type"));
