@@ -78,6 +78,11 @@ Return ONLY a pure JSON object with field indexes as string keys:
 Rules:
 - range/number  : a number within min/max bounds
 - select/radio  : pick one option value exactly as listed in the options array
+- react-select  : this is a searchable dropdown with NO static options array provided.
+                   If the field label/name suggests a real-world value (e.g. a state
+                   or city name), return your best realistic guess as plain text
+                   (e.g. "Maharashtra"). If the label is empty or unclear, return an
+                   empty string "" — do NOT invent placeholder text like "Option1".
 - checkbox      : true or false
 - date          : "YYYY-MM-DD" format only
 - Indian mobile : exactly 10 digits starting with 6, 7, 8, or 9
@@ -415,6 +420,11 @@ Page text (first 3000 chars):
 
         if field_type in {"select", "radio"}:
             return options[0][0] if options else ""
+        if field_type == "react-select":
+            # No static options to choose from until the dropdown is opened —
+            # leave blank so FormFiller._fill_react_select's own
+            # "pick first available option" logic decides at fill time.
+            return ""
         if field_type == "checkbox":
             return False
         if field_type == "checkbox-group":
@@ -552,6 +562,21 @@ Page text (first 3000 chars):
             return value if value in option_values else (
                 option_values[0] if option_values else value
             )
+
+        if field_type == "react-select":
+            # FIX: react-select fields never carry a static `options` array (their
+            # options are only populated dynamically once the dropdown is opened/typed
+            # into — see FormFiller._fill_react_select). With no options to validate
+            # against and often an empty `label` (DemoQA's City field), the AI had
+            # nothing to ground a real answer on and was inventing meaningless
+            # placeholders like "Option1". FormFiller._fill_react_select already
+            # handles "no exact match -> pick first available option" gracefully, so
+            # the safest grounded value here is a blank string: it signals "let the
+            # dropdown's own option list decide" rather than injecting a fake guess
+            # that masks what the dropdown actually contains.
+            if isinstance(value, str) and value.strip() and not re.match(r"^option\d*$", value.strip(), re.IGNORECASE):
+                return value.strip()
+            return ""
 
         if field_type == "checkbox":
             if isinstance(value, bool):

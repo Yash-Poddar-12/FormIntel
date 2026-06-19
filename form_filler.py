@@ -46,7 +46,6 @@ class FormFiller:
                 try:
                     page.wait_for_selector(selector, state="visible", timeout=3000)
                 except Exception:
-                    # React Select and similar: input may be hidden; click the container to reveal it.
                     try:
                         page.evaluate("""(sel) => {
                             const el = document.querySelector(sel);
@@ -85,19 +84,12 @@ class FormFiller:
                 is_tags_input = page.evaluate("""(sel) => {
                     const el = document.querySelector(sel);
                     if (!el) return false;
-                    // Already handled as react-select — skip
                     const cls = (el.className || '') + (el.getAttribute('id') || '');
                     if (cls.includes('react-select')) return false;
-                    // Check for tags/multi-select autocomplete patterns
                     const name = (el.getAttribute('name') || el.getAttribute('id') || '').toLowerCase();
                     const placeholder = (el.getAttribute('placeholder') || '').toLowerCase();
-                    // Only match explicit subjects/tags/skills/interests field names
                     const isTagsName = name.includes('subjects') || name.includes('tags') || name.includes('skills') || name.includes('interests');
-                    // Only match very specific placeholder phrases — NOT generic "add" words
-                    // "add" alone is too broad (e.g. "Add mobile number" on Bajaj form)
                     const isTagsPlaceholder = placeholder.includes('type to search') || placeholder.includes('select multiple');
-                    // Only match if the element is INSIDE a chip/tag container
-                    // (not just a Bootstrap multi-column parent which also uses class "multi")
                     const chipParent = el.closest('[class*="tagsinput"], [class*="chips"], [class*="token"]');
                     return isTagsName || isTagsPlaceholder || chipParent !== null;
                 }""", selector)
@@ -110,7 +102,7 @@ class FormFiller:
                 if field_type in {"text", "email", "tel", "number", "password", "textarea"}:
                     locator = page.locator(selector)
                     locator.fill("" if value is None else str(value))
-                    page.wait_for_timeout(800)  # increased from 600
+                    page.wait_for_timeout(800)
                     self._handle_autocomplete_dropdown(page, selector, str(value) if value else "")
 
                 elif field_type in {"date", "datetime-local", "time", "month"}:
@@ -136,14 +128,12 @@ class FormFiller:
                     try:
                         locator.select_option(target_value)
                     except Exception:
-                        # Exact value not in <option> list — try label match, then first non-empty option
                         selected = page.evaluate(
                             """([sel, val]) => {
                                 const el = document.querySelector(sel);
                                 if (!el) return false;
                                 const opts = Array.from(el.options).filter(o => o.value !== '' && !o.disabled);
                                 if (!opts.length) return false;
-                                // Try case-insensitive label match first
                                 const lower = val.toLowerCase();
                                 const byLabel = opts.find(o => o.text.toLowerCase().includes(lower) || lower.includes(o.text.toLowerCase()));
                                 const pick = byLabel || opts[0];
@@ -251,113 +241,22 @@ class FormFiller:
                     pass
                 continue
 
-        # ── Post-fill rescan: pick up dependent dropdowns that became visible ──
-        # Example: DemoQA City dropdown only appears after State is selected.
-        # These were invisible during the initial detect() so they weren't in `fields`.
-        self._fill_newly_visible_react_selects(page, fields, values)
+        # NOTE: The post-fill rescan for newly visible dependent fields (e.g. City
+        # after State) is now handled by the fill-until-stable loop in
+        # test_runner._traverse_multi_page_form, which calls AI to generate proper
+        # values for any newly appeared field. The old _fill_newly_visible_react_selects
+        # method has been removed because it matched by index keys ("0","1") instead
+        # of field labels, causing it to fill the City dropdown with "Arjun".
 
         return validation_messages
-
-    def _fill_newly_visible_react_selects(
-        self, page: Page, already_filled_fields: list[dict], values: dict
-    ) -> None:
-        """
-        After filling all known fields, scan for react-select inputs that are NOW
-        visible but were not in the original field list (dependent dropdowns like
-        DemoQA's City which only appears after State is selected).
-
-        Matches each new input to a value by label similarity against the values
-        dict keys, then fills it using _fill_react_select.
-        """
-        page.wait_for_timeout(600)
-
-        already_selectors = {str(f.get("selector", "")) for f in already_filled_fields}
-
-        # Find all visible react-select inputs on the page not already filled
-        new_selects = page.evaluate("""(alreadySelectors) => {
-            const results = [];
-            const inputs = Array.from(document.querySelectorAll('input[role="combobox"]'));
-            for (const el of inputs) {
-                const cls = (el.className || '') + (el.getAttribute('id') || '');
-                if (!cls.includes('react-select') && !cls.includes('select')) continue;
-
-                // Build selector: prefer id
-                let sel = '';
-                if (el.id) sel = '#' + el.id;
-                else if (el.getAttribute('name')) sel = '[name="' + el.getAttribute('name') + '"]';
-                else continue;
-
-                if (alreadySelectors.includes(sel)) continue;
-
-                // Must be visible
-                const rect = el.getBoundingClientRect();
-                if (rect.width === 0 || rect.height === 0) continue;
-                const style = window.getComputedStyle(el);
-                if (style.display === 'none' || style.visibility === 'hidden') continue;
-
-                // Read label from aria-label or placeholder
-                const label = (el.getAttribute('aria-label') || el.getAttribute('placeholder') || '').toLowerCase();
-
-                // Check if already has a value selected (single-value span present)
-                let parent = el.parentElement;
-                let hasValue = false;
-                for (let i = 0; i < 8; i++) {
-                    if (!parent) break;
-                    const sv = parent.querySelector('[class*="__single-value"]');
-                    if (sv && sv.textContent.trim()) { hasValue = true; break; }
-                    parent = parent.parentElement;
-                }
-                if (hasValue) continue;
-
-                results.push({ selector: sel, label: label });
-            }
-            return results;
-        }""", list(already_selectors))
-
-        if not new_selects:
-            return
-
-        print(f"[FormFiller] Post-fill rescan found {len(new_selects)} newly visible react-select(s)")
-
-        for item in new_selects:
-            sel = item.get("selector", "")
-            label_hint = item.get("label", "")
-            if not sel:
-                continue
-
-            # Find the best matching value from the values dict by label similarity
-            best_value = ""
-            best_score = -1
-            for key, val in values.items():
-                if val is None:
-                    continue
-                key_lower = str(key).lower().replace("_", " ")
-                label_lower = label_hint.lower()
-                score = 0
-                if key_lower == label_lower:
-                    score = 100
-                elif key_lower in label_lower or label_lower in key_lower:
-                    score = 80
-                else:
-                    kw = set(key_lower.split())
-                    lw = set(label_lower.split())
-                    overlap = len(kw & lw)
-                    if overlap:
-                        score = 50 + overlap
-                if score > best_score:
-                    best_score = score
-                    best_value = str(val)
-
-            print(f"[FormFiller] Filling newly visible react-select '{sel}' (label='{label_hint}') with '{best_value}'")
-            try:
-                self._fill_react_select(page, sel, best_value)
-            except Exception as exc:
-                print(f"[FormFiller] Post-fill react-select failed for {sel}: {exc}")
 
     def verify_fills(self, page: Page, fields: list[dict], intended_values: dict) -> dict:
         """
         After fill_all(), read back actual DOM values and compare to intended.
         Returns: {field_idx: {"intended": x, "actual": y, "stuck": bool}}
+
+        stuck=False means the value did not appear in the DOM — either the form
+        silently rejected it (e.g. Angular validation) or the fill tool failed.
         """
         verification: dict[str, dict] = {}
         for field in fields:
@@ -401,11 +300,27 @@ class FormFiller:
                 )
                 intended_str = "" if intended is None else str(intended)
                 actual_str = "" if actual is None else str(actual)
-                stuck = (intended_str == "" or actual_str.strip() != "")
 
+                # FIX: was a confusing double-assignment that only caught empty actual.
+                # Now also detects significant truncation (e.g. BHFL 3-char bug).
                 if intended_str and not actual_str.strip():
-                    print(f"[FormFiller] WARNING: Field '{label}' (idx {field_idx}) value did not stick — "
-                          f"intended '{intended_str[:40]}', actual '{actual_str[:40]}'")
+                    # Value completely absent — form silently rejected or fill failed
+                    print(
+                        f"[FormFiller] WARNING: Field '{label}' (idx {field_idx}) value did not stick — "
+                        f"intended '{intended_str[:40]}', actual '{actual_str[:40]}'"
+                    )
+                    stuck = False
+                elif (
+                    intended_str
+                    and actual_str.strip()
+                    and len(actual_str.strip()) < max(2, len(intended_str) // 2)
+                ):
+                    # Significant truncation detected (e.g. "987654321" truncated to "987")
+                    print(
+                        f"[FormFiller] WARNING: Field '{label}' (idx {field_idx}) value truncated — "
+                        f"intended '{intended_str[:40]}' ({len(intended_str)} chars), "
+                        f"actual '{actual_str.strip()[:40]}' ({len(actual_str.strip())} chars)"
+                    )
                     stuck = False
                 else:
                     stuck = True
@@ -540,7 +455,6 @@ class FormFiller:
                 }
                 if (!all.length) return false;
                 const tl = target.toLowerCase();
-                // Exact → substring → first
                 const exact  = all.find(o => o.textContent.trim().toLowerCase() === tl);
                 const substr = all.find(o => o.textContent.trim().toLowerCase().includes(tl) ||
                                             tl.includes(o.textContent.trim().toLowerCase()));
@@ -551,30 +465,23 @@ class FormFiller:
 
         def _best_match(options: list[str], target: str) -> str | None:
             tl = target.lower()
-            # exact
             for o in options:
                 if o.lower() == tl:
                     return o
-            # substring
             for o in options:
                 ol = o.lower()
                 if tl in ol or ol in tl:
                     return o
-            # word overlap
             tw = set(tl.split())
             best, best_n = None, 0
             for o in options:
                 n = len(tw & set(o.lower().split()))
                 if n > best_n:
                     best_n, best = n, o
-            return best  # None if no overlap at all
+            return best
 
         try:
-            # ── Step 1: open the dropdown with a REAL Playwright click ──────────
-            # JS .click() opens the menu but does NOT transfer real keyboard focus.
-            # The real .click() via Playwright does both.
             try:
-                # Try clicking the control/container (the visual dropdown button)
                 clicked_container = page.evaluate("""(sel) => {
                     const el = document.querySelector(sel);
                     if (!el) return false;
@@ -593,7 +500,6 @@ class FormFiller:
             except Exception:
                 clicked_container = False
 
-            # Real Playwright click to transfer keyboard focus
             try:
                 page.locator(selector).click(timeout=2000)
             except Exception:
@@ -614,7 +520,6 @@ class FormFiller:
                     return
 
             # ── Strategy B: type to search ───────────────────────────────────────
-            # Keyboard focus is on the input (from real .click() above).
             if value:
                 search_term = value[:4]
                 page.keyboard.type(search_term, delay=50)
@@ -632,21 +537,18 @@ class FormFiller:
                             print(f"[FormFiller] ReactSelect: '{value}' not found after typing '{search_term}', picked first: '{target}'")
                         return
 
-                # ── Strategy B2: typed text gave "No options" —
-                #    clear the text, reopen the dropdown, pick first available ────
+                # ── Strategy B2: typed text gave "No options" — clear and pick first ──
                 print(f"[FormFiller] ReactSelect: no options after typing '{search_term}' for '{value}' — clearing and picking first available")
                 for _ in range(len(search_term) + 1):
                     page.keyboard.press("Backspace")
                 page.wait_for_timeout(400)
 
-                # Reopen by clicking the dropdown indicator (▾ arrow button)
                 reopened = page.evaluate("""(sel) => {
                     const el = document.querySelector(sel);
                     if (!el) return false;
                     let p = el.parentElement;
                     for (let i = 0; i < 10; i++) {
                         if (!p) break;
-                        // The dropdown indicator sits inside __control
                         const indicator = p.querySelector(
                             '[class*="__dropdown-indicator"], [class*="__indicator"]'
                         );
@@ -703,11 +605,9 @@ class FormFiller:
         for term in terms:
             try:
                 page.locator(selector).click()
-                # Type first 3 chars to trigger options
                 page.keyboard.type(term[:3], delay=50)
                 page.wait_for_timeout(800)
 
-                # Read available options and find best match
                 available = page.evaluate("""() => {
                     const opts = document.querySelectorAll('[role="option"], [class*="option"]:not([class*="option--is-disabled"])');
                     return Array.from(opts).map(el => el.textContent.trim()).filter(t => t.length > 0).slice(0, 20);
@@ -721,7 +621,7 @@ class FormFiller:
                             best_option = opt
                             break
                     if not best_option:
-                        best_option = available[0]  # take first if no partial match
+                        best_option = available[0]
 
                 if best_option:
                     clicked = page.evaluate("""(targetText) => {
@@ -733,13 +633,12 @@ class FormFiller:
                             }
                         }
                         return false;
-                    }""", best_option[:10])  # use first 10 chars to match
+                    }""", best_option[:10])
                     if not clicked:
                         page.keyboard.press("ArrowDown")
                         page.wait_for_timeout(200)
                         page.keyboard.press("Enter")
                 else:
-                    # No options appeared — skip this term
                     page.keyboard.press("Escape")
                     continue
 
@@ -750,34 +649,26 @@ class FormFiller:
                     page.keyboard.press("Escape")
                     page.wait_for_timeout(300)
                 except Exception:
-                    pass    
+                    pass
 
     def _handle_autocomplete_dropdown(self, page: Page, selector: str, intended_value: str) -> None:
         """
         After typing, if a dropdown appeared FOR THIS SPECIFIC FIELD, click best matching option.
-        If no match found, clicks first available option (never leaves blank).
-        Falls back to ArrowDown+Enter if JS click fails.
-
-        Crucially: checks that the dropdown is anchored to this field, not some
-        other open menu elsewhere on the page (which caused textarea double-fill).
+        Scoped to the field's own container to avoid firing on unrelated open menus elsewhere.
         """
         try:
             dropdown_visible = page.evaluate("""(sel) => {
                 const el = document.querySelector(sel);
                 if (!el) return false;
 
-                // 1. Field itself says it has an open dropdown
                 if (el.getAttribute('aria-expanded') === 'true') return true;
 
-                // 2. Field has aria-controls / aria-owns pointing to a listbox
                 const controlled = el.getAttribute('aria-controls') || el.getAttribute('aria-owns');
                 if (controlled) {
                     const listbox = document.getElementById(controlled);
                     if (listbox && listbox.offsetParent !== null) return true;
                 }
 
-                // 3. A dropdown menu is a SIBLING or DESCENDANT of the field's
-                //    direct parent container — not just anywhere on the page.
                 const container = el.closest(
                     '[class*="auto-complete"], [class*="react-select"], ' +
                     '[class*="subjects-auto-complete"], [class*="combobox"]'
@@ -795,7 +686,6 @@ class FormFiller:
             if not dropdown_visible:
                 return
 
-            # Try clicking best matching option — fallback to first available if no match
             clicked = page.evaluate("""(targetText) => {
                 const optionSelectors = [
                     '[class*="auto-complete__option"]',
@@ -812,13 +702,11 @@ class FormFiller:
                 }
                 if (!allOptions.length) return false;
 
-                // Try label match first
                 const lower = targetText.toLowerCase();
                 const match = allOptions.find(o => {
                     const t = o.textContent.trim().toLowerCase();
                     return t.includes(lower) || lower.includes(t);
                 });
-                // No match → pick first visible non-disabled option
                 const pick = match || allOptions[0];
                 pick.click();
                 return true;
@@ -831,7 +719,6 @@ class FormFiller:
 
             page.wait_for_timeout(500)
 
-            # Verify value stuck after dropdown selection
             actual = page.evaluate(
                 "(sel) => { const el = document.querySelector(sel); return el ? (el.value || el.textContent || '') : ''; }",
                 selector

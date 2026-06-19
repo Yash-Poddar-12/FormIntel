@@ -17,7 +17,6 @@ class MultiPageHandler:
     def capture_network_response(self, page: Page, timeout_ms: int = 5000) -> list[dict]:
         """
         Capture likely form/API responses for timeout_ms and return a compact list.
-        For submit flows, click_submit_or_next starts the listener before clicking.
         """
         captured, handler = self._start_network_capture(page)
         try:
@@ -35,7 +34,6 @@ class MultiPageHandler:
         before_form_count = page.locator("form").count()
         before_field_count = self._count_visible_field_elements(page)
 
-        # Set up dialog (alert/confirm/prompt) capture
         captured_alerts: list[str] = []
         def handle_dialog(dialog):
             captured_alerts.append(dialog.message)
@@ -60,7 +58,10 @@ class MultiPageHandler:
 
             # b) semantic next/continue style buttons
             if not clicked:
-                texts = ["submit", "next", "continue", "proceed", "verify", "confirm"]
+                texts = [
+                    "submit", "next", "continue", "proceed", "verify", "confirm",
+                    "check-in", "checkin", "search", "retrieve", "go", "find booking",
+                ]
                 for text in texts:
                     try:
                         button = page.get_by_role("button", name=re.compile(text, re.IGNORECASE)).first
@@ -72,18 +73,45 @@ class MultiPageHandler:
                     except Exception as exc:
                         print(f"[MultiPageHandler] Role button click failed for '{text}': {exc}")
 
-            # c) any visible enabled button fallback
+            # c) any visible enabled button fallback — SCOPED to the form/widget
+            # area only. FIX: previously this searched ALL <button> elements on
+            # the page with no scoping, so on content-heavy sites (e.g. Air
+            # India's check-in page, full of navbar/carousel/chat-widget/scroll
+            # buttons) it would click the first visible button it found — often
+            # a carousel arrow or scroll-to-top control — producing an endless
+            # scroll loop instead of ever reaching the real check-in button.
+            # We now require the candidate button to be inside a <form>, OR
+            # inside a container that actually holds one of our detected input
+            # fields, and we explicitly skip known noise containers (nav,
+            # header, footer, chat widgets, cookie banners).
             if not clicked:
-                buttons = page.locator("button")
-                total = buttons.count()
+                candidates = page.locator(
+                    "form button, "
+                    "[class*='checkin'] button, [class*='check-in'] button, "
+                    "[class*='widget'] button, [class*='booking'] button"
+                )
+                total = candidates.count()
                 for i in range(total):
                     try:
-                        btn = buttons.nth(i)
-                        if btn.is_visible() and btn.is_enabled():
-                            btn.click()
-                            clicked = True
-                            clicked_kind = "next_clicked"
-                            break
+                        btn = candidates.nth(i)
+                        if not (btn.is_visible() and btn.is_enabled()):
+                            continue
+                        in_noise = btn.evaluate("""(el) => {
+                            const NOISE = [
+                                'nav', 'header', 'footer',
+                                '[role="navigation"]', '[role="banner"]', '[role="contentinfo"]',
+                                '[class*="cookie"]', '[class*="consent"]', '[class*="chat"]',
+                                '[class*="carousel"]', '[class*="slider"]', '[class*="scroll-top"]',
+                                '[class*="back-to-top"]', '[class*="newsletter"]', '[class*="promo"]',
+                            ];
+                            return NOISE.some(sel => { try { return el.closest(sel) !== null; } catch(_) { return false; } });
+                        }""")
+                        if in_noise:
+                            continue
+                        btn.click()
+                        clicked = True
+                        clicked_kind = "next_clicked"
+                        break
                     except Exception:
                         continue
 
@@ -116,6 +144,14 @@ class MultiPageHandler:
         return clicked_kind, captured_alerts, network_responses
 
     def detect_success(self, page: Page) -> bool:
+        """
+        Returns True if the page shows clear success indicators after submission.
+
+        FIX: Removed the dead `forms_disappeared` variable that was computed but
+        never included in the return value. Keeping it caused false positives on
+        SPAs where form disappears during navigation even on failure. Now we only
+        return True on explicit success keyword hits in page text.
+        """
         try:
             body_text = page.inner_text("body").lower()
         except Exception:
@@ -125,14 +161,7 @@ class MultiPageHandler:
             "success", "thank you", "submitted", "application number",
             "reference number", "congratulations", "approved", "received",
         ]
-        keyword_hit = any(word in body_text for word in success_keywords)
-
-        try:
-            forms_disappeared = page.locator("form").count() == 0
-        except Exception:
-            forms_disappeared = False
-
-        return keyword_hit
+        return any(word in body_text for word in success_keywords)
 
     def detect_errors(self, page: Page) -> list[str]:
         """
@@ -183,14 +212,28 @@ class MultiPageHandler:
             pass
 
         # 3) aria-live regions
+        # FIX: React Select (and other accessible widgets) use a hidden
+        # aria-live="polite" region purely to announce selections to screen
+        # readers (e.g. "option Delhi, selected."). This is NOT an error — it
+        # was being swept into all_page_errors and causing valid form fills
+        # to be misreported as FAIL. We now skip aria-live text that matches
+        # known selection-announcement phrasing.
+        SELECTION_ANNOUNCEMENT_PATTERNS = [
+            "selected.", "selected,", "deselected", "menu is open",
+            "menu is closed", "results available", "option ",
+        ]
         try:
             live_regions = page.locator("[aria-live='assertive'], [aria-live='polite']")
             for i in range(live_regions.count()):
                 try:
                     if live_regions.nth(i).is_visible():
                         text = live_regions.nth(i).inner_text().strip()
-                        if text:
-                            _add(text)
+                        if not text:
+                            continue
+                        text_lower = text.lower()
+                        if any(pat in text_lower for pat in SELECTION_ANNOUNCEMENT_PATTERNS):
+                            continue
+                        _add(text)
                 except Exception:
                     continue
         except Exception:
@@ -209,7 +252,7 @@ class MultiPageHandler:
         except Exception:
             pass
 
-        # 5) Visible elements with error-pattern text (only if small, targeted elements)
+        # 5) Visible elements with error-pattern text (only small, targeted elements)
         ERROR_PATTERNS = [
             "is invalid", "is incorrect", "is not valid",
             "please enter", "cannot be", "does not match",
@@ -217,7 +260,7 @@ class MultiPageHandler:
         ]
         try:
             visible_text_nodes = page.locator("span, p, small, div.message, div.msg, label.error")
-            count = min(visible_text_nodes.count(), 50)  # cap to avoid scanning whole page
+            count = min(visible_text_nodes.count(), 50)
             for i in range(count):
                 try:
                     node = visible_text_nodes.nth(i)
@@ -267,7 +310,6 @@ class MultiPageHandler:
             'input:not([type="hidden"])',
             'select',
             'textarea',
-            'div[contenteditable]',
             'div[contenteditable="true"]'
           ];
           const nodes = Array.from(document.querySelectorAll(selectors.join(',')));
