@@ -480,6 +480,13 @@ class TestRunner:
             except Exception:
                 pass
 
+            # Dismiss cookie-consent overlays (OneTrust, etc.) before any field
+            # filling begins. These banners can intercept clicks on form fields
+            # too, not just the final submit button — see MultiPageHandler.
+            # _dismiss_cookie_consent for the Air India OneTrust issue this fixes.
+            if page_num == 1:
+                handler._dismiss_cookie_consent(page)
+
             # ── Fill-until-stable loop ────────────────────────────────────────────
             # Round 0: detect all currently visible fields, fill them.
             # Round 1+: re-detect. If new fields appeared (e.g. dependent dropdowns),
@@ -529,9 +536,23 @@ class TestRunner:
                 else:
                     # Override mode (variation tests / CSV data mode):
                     # look up each new field's value from the override dict.
+                    #
+                    # FIX: previously this used `if val is not None and str(val).strip() != ""`
+                    # to decide whether to fill a field. That conflated two different
+                    # signals that need different handling:
+                    #   - val is None      -> field genuinely has NO override value at all
+                    #                          (e.g. intentionally blank OR-group side) -> skip filling
+                    #   - val == ""         -> field DOES have an override value, and that
+                    #                          value IS the empty string on purpose (e.g. the
+                    #                          "empty" invalid-variation test for Mobile Number)
+                    #                          -> MUST still be filled (i.e. cleared), otherwise
+                    #                             whatever value was already in the DOM from a
+                    #                             previous fill/page-state is left untouched and
+                    #                             the "empty" variation never actually gets tested.
+                    # Only `val is None` should be treated as "no value, skip this field".
                     for field in new_fields:
                         val = self._value_for_field_from_override(field, values_override)
-                        if val is not None and str(val).strip() != "":
+                        if val is not None:
                             field_idx = str(field.get("index"))
                             round_values[field_idx] = val
                             fields_to_fill.append(field)

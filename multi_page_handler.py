@@ -34,6 +34,17 @@ class MultiPageHandler:
         before_form_count = page.locator("form").count()
         before_field_count = self._count_visible_field_elements(page)
 
+        # FIX: cookie-consent overlays (OneTrust, CookieBot, etc.) render an
+        # invisible/semi-transparent backdrop div that sits ON TOP of the real
+        # page content in z-index, even though the actual form button is
+        # "visible, enabled, and stable" by Playwright's own checks. The click
+        # then times out with "<div ...onetrust...> subtree intercepts pointer
+        # events" — this is exactly what was happening on Air India: the real
+        # Submit button was found correctly every time, but a consent banner
+        # backdrop silently absorbed every click attempt. We dismiss/accept
+        # common cookie banners BEFORE attempting any submit/next click.
+        self._dismiss_cookie_consent(page)
+
         captured_alerts: list[str] = []
         def handle_dialog(dialog):
             captured_alerts.append(dialog.message)
@@ -50,28 +61,45 @@ class MultiPageHandler:
             if submit.count() > 0:
                 try:
                     if submit.is_visible() and submit.is_enabled():
-                        submit.click()
+                        submit.click(timeout=4000)
                         clicked = True
                         clicked_kind = "submitted"
                 except Exception as exc:
-                    print(f"[MultiPageHandler] Submit click failed: {exc}")
+                    print(f"[MultiPageHandler] Submit click failed/timed out: {exc}")
 
             # b) semantic next/continue style buttons
+            # FIX: removed overly generic words ("go", "search" alone, "confirm")
+            # that were matching unrelated navbar/language-switcher/search-bar
+            # buttons on content-heavy sites like Air India. Also added an
+            # explicit short timeout to .click() — Playwright's default click()
+            # waits (up to the page's default_timeout, here 30s) for the target
+            # to become "stable" (not moving/animating) before clicking. If the
+            # matched button sits inside a sticky header, carousel, or lazily
+            # re-rendering banner, Playwright keeps auto-scrolling it into view
+            # and re-checking stability — which is exactly the "scrolling up and
+            # down with no further log output" symptom. A short explicit timeout
+            # makes a bad match fail fast (caught by except) and fall through to
+            # the next candidate instead of hanging silently for 30+ seconds.
             if not clicked:
                 texts = [
-                    "submit", "next", "continue", "proceed", "verify", "confirm",
-                    "check-in", "checkin", "search", "retrieve", "go", "find booking",
+                    "submit", "next", "continue", "proceed", "verify",
+                    "check-in", "checkin", "web check-in", "retrieve booking",
+                    "find booking",
                 ]
                 for text in texts:
                     try:
                         button = page.get_by_role("button", name=re.compile(text, re.IGNORECASE)).first
-                        if button.count() > 0 and button.is_visible() and button.is_enabled():
-                            button.click()
-                            clicked = True
-                            clicked_kind = "next_clicked" if text in {"next", "continue", "proceed"} else "submitted"
-                            break
+                        if button.count() == 0:
+                            continue
+                        if not (button.is_visible() and button.is_enabled()):
+                            continue
+                        button.click(timeout=4000)
+                        clicked = True
+                        clicked_kind = "next_clicked" if text in {"next", "continue", "proceed"} else "submitted"
+                        break
                     except Exception as exc:
-                        print(f"[MultiPageHandler] Role button click failed for '{text}': {exc}")
+                        print(f"[MultiPageHandler] Role button click failed/timed out for '{text}': {exc}")
+                        continue
 
             # c) any visible enabled button fallback — SCOPED to the form/widget
             # area only. FIX: previously this searched ALL <button> elements on
@@ -83,7 +111,8 @@ class MultiPageHandler:
             # We now require the candidate button to be inside a <form>, OR
             # inside a container that actually holds one of our detected input
             # fields, and we explicitly skip known noise containers (nav,
-            # header, footer, chat widgets, cookie banners).
+            # header, footer, chat widgets, cookie banners). Also added the same
+            # explicit short timeout as fallback (b) above, for the same reason.
             if not clicked:
                 candidates = page.locator(
                     "form button, "
@@ -108,11 +137,12 @@ class MultiPageHandler:
                         }""")
                         if in_noise:
                             continue
-                        btn.click()
+                        btn.click(timeout=4000)
                         clicked = True
                         clicked_kind = "next_clicked"
                         break
-                    except Exception:
+                    except Exception as exc:
+                        print(f"[MultiPageHandler] Fallback button click failed/timed out at index {i}: {exc}")
                         continue
 
             if not clicked:
@@ -302,6 +332,79 @@ class MultiPageHandler:
             pass
 
         return 1
+
+    def _dismiss_cookie_consent(self, page: Page) -> None:
+        """
+        Dismiss cookie-consent banners that render an overlay backdrop capable
+        of intercepting pointer events even when the real target button is
+        visible/enabled/stable. OneTrust (id="onetrust-consent-sdk") is the
+        most common on enterprise sites (confirmed on Air India's check-in
+        page); we also try generic accept-button text patterns as a fallback
+        for other consent providers (CookieBot, Quantcast, TrustArc, etc.).
+        """
+        # 1) OneTrust — accept-all button has a stable, well-known id
+        try:
+            onetrust_accept = page.locator("#onetrust-accept-btn-handler")
+            if onetrust_accept.count() > 0 and onetrust_accept.first.is_visible():
+                onetrust_accept.first.click(timeout=3000)
+                page.wait_for_timeout(500)
+                print("[MultiPageHandler] Dismissed OneTrust cookie consent banner")
+                return
+        except Exception as exc:
+            print(f"[MultiPageHandler] OneTrust dismiss attempt failed: {exc}")
+
+        # 2) Generic accept/agree/got it buttons inside any cookie/consent container
+        generic_selectors = [
+            "#onetrust-accept-btn-handler",
+            "[id*='cookie'] button:has-text('Accept')",
+            "[id*='cookie'] button:has-text('Agree')",
+            "[id*='consent'] button:has-text('Accept')",
+            "[class*='cookie'] button:has-text('Accept')",
+            "[class*='consent'] button:has-text('Accept')",
+            "button:has-text('Accept All')",
+            "button:has-text('Accept all cookies')",
+            "button:has-text('I Agree')",
+            "button:has-text('Got it')",
+        ]
+        for sel in generic_selectors:
+            try:
+                btn = page.locator(sel).first
+                if btn.count() > 0 and btn.is_visible():
+                    btn.click(timeout=3000)
+                    page.wait_for_timeout(500)
+                    print(f"[MultiPageHandler] Dismissed cookie consent banner via selector: {sel}")
+                    return
+            except Exception:
+                continue
+
+        # 3) Last resort — if a known overlay backdrop element exists but no
+        # accept button was clickable, forcibly hide the backdrop via JS so it
+        # stops intercepting pointer events. This does not "accept" cookies,
+        # it just removes the click-blocking layer so the test can proceed.
+        try:
+            hidden = page.evaluate("""() => {
+                const selectors = [
+                    '.onetrust-pc-dark-filter',
+                    '#onetrust-consent-sdk',
+                    '[id*="cookie"][class*="overlay"]',
+                    '[id*="consent"][class*="overlay"]',
+                    '[class*="cookie-backdrop"]',
+                    '[class*="consent-backdrop"]',
+                ];
+                let count = 0;
+                for (const sel of selectors) {
+                    document.querySelectorAll(sel).forEach(el => {
+                        el.style.display = 'none';
+                        el.style.pointerEvents = 'none';
+                        count++;
+                    });
+                }
+                return count;
+            }""")
+            if hidden:
+                print(f"[MultiPageHandler] Force-hid {hidden} cookie consent overlay element(s) via JS")
+        except Exception:
+            pass
 
     def _count_visible_field_elements(self, page: Page) -> int:
         script = """
