@@ -326,15 +326,15 @@ class TestRunner:
                 active_fields = [f for f in all_fields if not f.get("skip") or f.get("type") == "otp"]
                 field_matches = self._match_csv_fields(row, active_fields)
 
+                # FIX: was storing values under 3 keys (index, csv_label, label_candidates)
+                # which cluttered the report. Now stores only under field index key.
+                # _value_for_field_from_override always finds the index key first anyway.
                 for csv_label, field in field_matches.items():
                     cell_value = row.get(csv_label)
                     if cell_value is None or str(cell_value).strip() == "":
                         continue
                     field_idx = str(field.get("index"))
-                    values[field_idx] = cell_value
-                    values[csv_label] = cell_value
-                    for label_key in self._field_label_candidates(field):
-                        values[label_key] = cell_value
+                    values[field_idx] = cell_value  # index key only
                     matched_fields[csv_label] = int(field.get("index"))
                     fields_to_fill.append(field)
 
@@ -453,9 +453,16 @@ class TestRunner:
         """
         Fill and submit a potentially multi-page form.
 
-        Page 1 keeps raw detector field indexes in accumulated dicts so existing
-        baseline/variation code can keep using them. Later pages are namespaced
-        as page_N.field_index because detector.detect() re-indexes each page.
+        KEY CHANGE — Fill-until-stable loop per page:
+        Instead of filling all visible fields once and hoping for the best,
+        we loop up to MAX_STABILITY_ROUNDS times per page. After each fill
+        round we re-detect fields. Any newly visible fields (e.g. City
+        dropdown that appears after State is selected) are caught in the next
+        round and get proper AI-generated values rather than a wrong guess.
+
+        This replaces the old _fill_newly_visible_react_selects approach which
+        was broken because it matched values by dict key ("0","1","2") instead
+        of by field label, causing the City dropdown to be filled with "Arjun".
         """
         all_validation_msgs: dict = {}
         all_page_errors: list[str] = []
@@ -464,6 +471,8 @@ class TestRunner:
         all_alert_texts: list[str] = []
         all_values_used: dict = {}
 
+        MAX_STABILITY_ROUNDS = 5
+
         for page_num in range(1, max_pages + 1):
             page.wait_for_timeout(2000)
             try:
@@ -471,45 +480,142 @@ class TestRunner:
             except Exception:
                 pass
 
-            current_fields = detector.detect(page)
-            if required_only:
-                active = [f for f in current_fields if f.get("required") and not f.get("skip")]
-            else:
-                active = [f for f in current_fields if not f.get("skip") or f.get("type") == "otp"]
+            # Dismiss cookie-consent overlays (OneTrust, etc.) before any field
+            # filling begins. These banners can intercept clicks on form fields
+            # too, not just the final submit button — see MultiPageHandler.
+            # _dismiss_cookie_consent for the Air India OneTrust issue this fixes.
+            if page_num == 1:
+                handler._dismiss_cookie_consent(page)
 
-            if not active:
-                print(f"[MultiPage] Page {page_num}: no fillable fields detected - stopping traversal")
-                break
+            # ── Fill-until-stable loop ────────────────────────────────────────────
+            # Round 0: detect all currently visible fields, fill them.
+            # Round 1+: re-detect. If new fields appeared (e.g. dependent dropdowns),
+            #   generate values for them and fill. Repeat until no new fields appear.
+            known_selectors: set[str] = set()
+            page_values_accumulated: dict = {}
+            page_validation_msgs: dict = {}
+            page_fill_verification: dict = {}
 
-            page_values, fields_to_fill = self._values_for_traversal_page(
-                active=active,
-                ai=ai,
-                values_override=values_override,
-                page_num=page_num,
-            )
-            if values_override is None and page_values:
-                page_or_groups = detector.detect_or_groups(page, current_fields)
-                if page_or_groups:
-                    for group in page_or_groups:
-                        print(f"[OR Group] Detected during traversal: {group.get('description', '')}")
-                    self._apply_or_side_to_values(page_values, page_or_groups, side="before")
+            for round_num in range(MAX_STABILITY_ROUNDS):
+                current_fields = detector.detect(page)
+                if required_only:
+                    active = [f for f in current_fields if f.get("required") and not f.get("skip")]
+                else:
+                    active = [f for f in current_fields if not f.get("skip") or f.get("type") == "otp"]
 
-            if fields_to_fill:
-                print(f"[MultiPage] Page {page_num}: filling {len(fields_to_fill)} fields")
-                validation_msgs = filler.fill_all(page, fields_to_fill, page_values)
-                fill_verification = filler.verify_fills(page, fields_to_fill, page_values)
-                self._merge_page_dict(all_validation_msgs, validation_msgs, page_num)
-                self._merge_page_dict(all_fill_verification, fill_verification, page_num)
-                self._merge_page_dict(all_values_used, page_values, page_num)
-            else:
-                print(f"[MultiPage] Page {page_num}: no values available - attempting to continue")
+                if not active:
+                    print(f"[MultiPage] Page {page_num}: no fillable fields detected — stopping traversal")
+                    break
 
+                # Only process fields not yet seen in previous rounds of this page
+                new_fields = [
+                    f for f in active
+                    if str(f.get("selector", "")) not in known_selectors
+                ]
+
+                if not new_fields:
+                    print(f"[MultiPage] Page {page_num}: field set stable after {round_num} fill round(s)")
+                    break
+
+                # ── Resolve values for new fields ─────────────────────────────────
+                round_values: dict = {}
+                fields_to_fill: list[dict] = []
+
+                if values_override is None:
+                    # AI baseline mode: generate fresh values for all new fields
+                    round_values = ai.generate_baseline_values(new_fields) if ai is not None else {}
+                    fields_to_fill = new_fields if round_values else []
+
+                    # Apply OR groups on the first round of the first page only
+                    if round_num == 0:
+                        page_or_groups = detector.detect_or_groups(page, current_fields)
+                        if page_or_groups:
+                            for grp in page_or_groups:
+                                print(f"[OR Group] Traversal page {page_num}: {grp.get('description', '')}")
+                            self._apply_or_side_to_values(round_values, page_or_groups, side="before")
+                else:
+                    # Override mode (variation tests / CSV data mode):
+                    # look up each new field's value from the override dict.
+                    #
+                    # FIX: previously this used `if val is not None and str(val).strip() != ""`
+                    # to decide whether to fill a field. That conflated two different
+                    # signals that need different handling:
+                    #   - val is None      -> field genuinely has NO override value at all
+                    #                          (e.g. intentionally blank OR-group side) -> skip filling
+                    #   - val == ""         -> field DOES have an override value, and that
+                    #                          value IS the empty string on purpose (e.g. the
+                    #                          "empty" invalid-variation test for Mobile Number)
+                    #                          -> MUST still be filled (i.e. cleared), otherwise
+                    #                             whatever value was already in the DOM from a
+                    #                             previous fill/page-state is left untouched and
+                    #                             the "empty" variation never actually gets tested.
+                    # Only `val is None` should be treated as "no value, skip this field".
+                    for field in new_fields:
+                        val = self._value_for_field_from_override(field, values_override)
+                        if val is not None:
+                            field_idx = str(field.get("index"))
+                            round_values[field_idx] = val
+                            fields_to_fill.append(field)
+
+                    # Fields not matched in the override dict fall into two categories:
+                    # (a) round > 0: dynamically appeared (e.g. City after State selection)
+                    # (b) page > 1: multi-page form — page 2+ fields never had override values
+                    # For both cases, call AI to generate a sensible baseline value.
+                    unmatched = [
+                        f for f in new_fields
+                        if str(f.get("index")) not in round_values
+                    ]
+                    if unmatched and ai is not None and (round_num > 0 or page_num > 1):
+                        print(
+                            f"[MultiPage] Page {page_num} round {round_num + 1}: "
+                            f"generating AI values for {len(unmatched)} newly appeared field(s)"
+                        )
+                        ai_vals = ai.generate_baseline_values(unmatched)
+                        round_values.update(ai_vals)
+                        for f in unmatched:
+                            if str(f.get("index")) in ai_vals:
+                                fields_to_fill.append(f)
+
+                # ── Fill new fields ───────────────────────────────────────────────
+                if fields_to_fill:
+                    print(
+                        f"[MultiPage] Page {page_num} fill round {round_num + 1}: "
+                        f"filling {len(fields_to_fill)} field(s)"
+                    )
+                    v_msgs = filler.fill_all(page, fields_to_fill, round_values)
+                    f_verif = filler.verify_fills(page, fields_to_fill, round_values)
+                    page_validation_msgs.update(v_msgs)
+                    page_fill_verification.update(f_verif)
+                    page_values_accumulated.update(round_values)
+                elif round_num == 0:
+                    print(f"[MultiPage] Page {page_num}: no values available for initial fill — attempting to continue")
+
+                # Mark all currently visible fields as known for the next round
+                for f in active:
+                    known_selectors.add(str(f.get("selector", "")))
+
+                # Wait for DOM to settle — new fields may appear after filling
+                page.wait_for_timeout(800)
+
+            # Merge this page's accumulated results into the overall accumulators
+            self._merge_page_dict(all_validation_msgs, page_validation_msgs, page_num)
+            self._merge_page_dict(all_fill_verification, page_fill_verification, page_num)
+            self._merge_page_dict(all_values_used, page_values_accumulated, page_num)
+
+            # Collect any errors visible after filling.
+            # FIX: we no longer STOP here if errors are found. Some sites (e.g. BHFL)
+            # have persistent error banners unrelated to our input that were causing
+            # the tool to abort before ever clicking submit. We record them for the
+            # report and proceed with submission so we can get the real server response.
             interim_errors = handler.detect_errors(page)
             if interim_errors:
                 all_page_errors.extend(interim_errors)
-                print(f"[MultiPage] Page {page_num}: errors detected before clicking next - stopping")
-                break
+                print(
+                    f"[MultiPage] Page {page_num}: {len(interim_errors)} error element(s) visible "
+                    f"after filling — submitting anyway to capture server response"
+                )
 
+            # ── Click submit / next ───────────────────────────────────────────────
             click_result, alert_texts, network_responses = handler.click_submit_or_next(page)
             all_alert_texts.extend(alert_texts)
             all_network_responses.extend(network_responses)
@@ -517,7 +623,7 @@ class TestRunner:
             print(f"[MultiPage] Page {page_num}: click result = {click_result}")
 
             if click_result == "nothing_clicked":
-                print(f"[MultiPage] Page {page_num}: no button found - stopping")
+                print(f"[MultiPage] Page {page_num}: no button found — stopping")
                 break
 
             if click_result == "submitted":
@@ -647,6 +753,10 @@ class TestRunner:
         values_override: dict | None,
         page_num: int,
     ) -> tuple[dict, list[dict]]:
+        """
+        Kept for reference. No longer called directly from _traverse_multi_page_form —
+        that function now handles value resolution inline inside the stability loop.
+        """
         if values_override is None:
             page_values = ai.generate_baseline_values(active) if ai is not None else {}
             return page_values, active if page_values else []
@@ -713,7 +823,6 @@ class TestRunner:
             error_words = ["invalid", "incorrect", "error", "failed", "cannot", "wrong", "required"]
             if any(w in first_alert.lower() for w in error_words):
                 return "FAIL", f"Alert dialog: {first_alert}"
-            # Alert might be success confirmation
             success_words = ["success", "submitted", "thank", "confirmed", "approved"]
             if any(w in first_alert.lower() for w in success_words):
                 return "PASS", f"Alert confirmed success: {first_alert}"
@@ -732,11 +841,18 @@ class TestRunner:
         if page_errors:
             return "FAIL", f"Visible error elements detected: {page_errors[0][:80]}"
 
-        # Priority 5: Fill verification - if the field we're testing didn't stick
+        # Priority 5: Fill verification — value did not appear in DOM
+        # FIX: was returning PASS ("form may have rejected input silently") which was
+        # misleading — it could also mean the fill tool itself failed. Returning ERROR
+        # makes it clear this test case could not determine the form's validation
+        # behaviour and should be investigated separately.
         if fill_verification:
             unstuck = [k for k, v in fill_verification.items() if not v.get("stuck") and v.get("intended")]
             if unstuck:
-                return "PASS", f"Form may have rejected input silently (fields {unstuck} value did not stick)"
+                return "ERROR", (
+                    f"Fill failed — field(s) {unstuck} did not accept their value. "
+                    f"Cannot determine form validation outcome."
+                )
 
         # Priority 6: API/network response text
         if network_responses:

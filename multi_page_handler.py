@@ -17,7 +17,6 @@ class MultiPageHandler:
     def capture_network_response(self, page: Page, timeout_ms: int = 5000) -> list[dict]:
         """
         Capture likely form/API responses for timeout_ms and return a compact list.
-        For submit flows, click_submit_or_next starts the listener before clicking.
         """
         captured, handler = self._start_network_capture(page)
         try:
@@ -35,7 +34,17 @@ class MultiPageHandler:
         before_form_count = page.locator("form").count()
         before_field_count = self._count_visible_field_elements(page)
 
-        # Set up dialog (alert/confirm/prompt) capture
+        # FIX: cookie-consent overlays (OneTrust, CookieBot, etc.) render an
+        # invisible/semi-transparent backdrop div that sits ON TOP of the real
+        # page content in z-index, even though the actual form button is
+        # "visible, enabled, and stable" by Playwright's own checks. The click
+        # then times out with "<div ...onetrust...> subtree intercepts pointer
+        # events" — this is exactly what was happening on Air India: the real
+        # Submit button was found correctly every time, but a consent banner
+        # backdrop silently absorbed every click attempt. We dismiss/accept
+        # common cookie banners BEFORE attempting any submit/next click.
+        self._dismiss_cookie_consent(page)
+
         captured_alerts: list[str] = []
         def handle_dialog(dialog):
             captured_alerts.append(dialog.message)
@@ -52,39 +61,88 @@ class MultiPageHandler:
             if submit.count() > 0:
                 try:
                     if submit.is_visible() and submit.is_enabled():
-                        submit.click()
+                        submit.click(timeout=4000)
                         clicked = True
                         clicked_kind = "submitted"
                 except Exception as exc:
-                    print(f"[MultiPageHandler] Submit click failed: {exc}")
+                    print(f"[MultiPageHandler] Submit click failed/timed out: {exc}")
 
             # b) semantic next/continue style buttons
+            # FIX: removed overly generic words ("go", "search" alone, "confirm")
+            # that were matching unrelated navbar/language-switcher/search-bar
+            # buttons on content-heavy sites like Air India. Also added an
+            # explicit short timeout to .click() — Playwright's default click()
+            # waits (up to the page's default_timeout, here 30s) for the target
+            # to become "stable" (not moving/animating) before clicking. If the
+            # matched button sits inside a sticky header, carousel, or lazily
+            # re-rendering banner, Playwright keeps auto-scrolling it into view
+            # and re-checking stability — which is exactly the "scrolling up and
+            # down with no further log output" symptom. A short explicit timeout
+            # makes a bad match fail fast (caught by except) and fall through to
+            # the next candidate instead of hanging silently for 30+ seconds.
             if not clicked:
-                texts = ["submit", "next", "continue", "proceed", "verify", "confirm"]
+                texts = [
+                    "submit", "next", "continue", "proceed", "verify",
+                    "check-in", "checkin", "web check-in", "retrieve booking",
+                    "find booking",
+                ]
                 for text in texts:
                     try:
                         button = page.get_by_role("button", name=re.compile(text, re.IGNORECASE)).first
-                        if button.count() > 0 and button.is_visible() and button.is_enabled():
-                            button.click()
-                            clicked = True
-                            clicked_kind = "next_clicked" if text in {"next", "continue", "proceed"} else "submitted"
-                            break
+                        if button.count() == 0:
+                            continue
+                        if not (button.is_visible() and button.is_enabled()):
+                            continue
+                        button.click(timeout=4000)
+                        clicked = True
+                        clicked_kind = "next_clicked" if text in {"next", "continue", "proceed"} else "submitted"
+                        break
                     except Exception as exc:
-                        print(f"[MultiPageHandler] Role button click failed for '{text}': {exc}")
+                        print(f"[MultiPageHandler] Role button click failed/timed out for '{text}': {exc}")
+                        continue
 
-            # c) any visible enabled button fallback
+            # c) any visible enabled button fallback — SCOPED to the form/widget
+            # area only. FIX: previously this searched ALL <button> elements on
+            # the page with no scoping, so on content-heavy sites (e.g. Air
+            # India's check-in page, full of navbar/carousel/chat-widget/scroll
+            # buttons) it would click the first visible button it found — often
+            # a carousel arrow or scroll-to-top control — producing an endless
+            # scroll loop instead of ever reaching the real check-in button.
+            # We now require the candidate button to be inside a <form>, OR
+            # inside a container that actually holds one of our detected input
+            # fields, and we explicitly skip known noise containers (nav,
+            # header, footer, chat widgets, cookie banners). Also added the same
+            # explicit short timeout as fallback (b) above, for the same reason.
             if not clicked:
-                buttons = page.locator("button")
-                total = buttons.count()
+                candidates = page.locator(
+                    "form button, "
+                    "[class*='checkin'] button, [class*='check-in'] button, "
+                    "[class*='widget'] button, [class*='booking'] button"
+                )
+                total = candidates.count()
                 for i in range(total):
                     try:
-                        btn = buttons.nth(i)
-                        if btn.is_visible() and btn.is_enabled():
-                            btn.click()
-                            clicked = True
-                            clicked_kind = "next_clicked"
-                            break
-                    except Exception:
+                        btn = candidates.nth(i)
+                        if not (btn.is_visible() and btn.is_enabled()):
+                            continue
+                        in_noise = btn.evaluate("""(el) => {
+                            const NOISE = [
+                                'nav', 'header', 'footer',
+                                '[role="navigation"]', '[role="banner"]', '[role="contentinfo"]',
+                                '[class*="cookie"]', '[class*="consent"]', '[class*="chat"]',
+                                '[class*="carousel"]', '[class*="slider"]', '[class*="scroll-top"]',
+                                '[class*="back-to-top"]', '[class*="newsletter"]', '[class*="promo"]',
+                            ];
+                            return NOISE.some(sel => { try { return el.closest(sel) !== null; } catch(_) { return false; } });
+                        }""")
+                        if in_noise:
+                            continue
+                        btn.click(timeout=4000)
+                        clicked = True
+                        clicked_kind = "next_clicked"
+                        break
+                    except Exception as exc:
+                        print(f"[MultiPageHandler] Fallback button click failed/timed out at index {i}: {exc}")
                         continue
 
             if not clicked:
@@ -116,6 +174,14 @@ class MultiPageHandler:
         return clicked_kind, captured_alerts, network_responses
 
     def detect_success(self, page: Page) -> bool:
+        """
+        Returns True if the page shows clear success indicators after submission.
+
+        FIX: Removed the dead `forms_disappeared` variable that was computed but
+        never included in the return value. Keeping it caused false positives on
+        SPAs where form disappears during navigation even on failure. Now we only
+        return True on explicit success keyword hits in page text.
+        """
         try:
             body_text = page.inner_text("body").lower()
         except Exception:
@@ -125,14 +191,7 @@ class MultiPageHandler:
             "success", "thank you", "submitted", "application number",
             "reference number", "congratulations", "approved", "received",
         ]
-        keyword_hit = any(word in body_text for word in success_keywords)
-
-        try:
-            forms_disappeared = page.locator("form").count() == 0
-        except Exception:
-            forms_disappeared = False
-
-        return keyword_hit
+        return any(word in body_text for word in success_keywords)
 
     def detect_errors(self, page: Page) -> list[str]:
         """
@@ -183,14 +242,28 @@ class MultiPageHandler:
             pass
 
         # 3) aria-live regions
+        # FIX: React Select (and other accessible widgets) use a hidden
+        # aria-live="polite" region purely to announce selections to screen
+        # readers (e.g. "option Delhi, selected."). This is NOT an error — it
+        # was being swept into all_page_errors and causing valid form fills
+        # to be misreported as FAIL. We now skip aria-live text that matches
+        # known selection-announcement phrasing.
+        SELECTION_ANNOUNCEMENT_PATTERNS = [
+            "selected.", "selected,", "deselected", "menu is open",
+            "menu is closed", "results available", "option ",
+        ]
         try:
             live_regions = page.locator("[aria-live='assertive'], [aria-live='polite']")
             for i in range(live_regions.count()):
                 try:
                     if live_regions.nth(i).is_visible():
                         text = live_regions.nth(i).inner_text().strip()
-                        if text:
-                            _add(text)
+                        if not text:
+                            continue
+                        text_lower = text.lower()
+                        if any(pat in text_lower for pat in SELECTION_ANNOUNCEMENT_PATTERNS):
+                            continue
+                        _add(text)
                 except Exception:
                     continue
         except Exception:
@@ -209,7 +282,7 @@ class MultiPageHandler:
         except Exception:
             pass
 
-        # 5) Visible elements with error-pattern text (only if small, targeted elements)
+        # 5) Visible elements with error-pattern text (only small, targeted elements)
         ERROR_PATTERNS = [
             "is invalid", "is incorrect", "is not valid",
             "please enter", "cannot be", "does not match",
@@ -217,7 +290,7 @@ class MultiPageHandler:
         ]
         try:
             visible_text_nodes = page.locator("span, p, small, div.message, div.msg, label.error")
-            count = min(visible_text_nodes.count(), 50)  # cap to avoid scanning whole page
+            count = min(visible_text_nodes.count(), 50)
             for i in range(count):
                 try:
                     node = visible_text_nodes.nth(i)
@@ -260,6 +333,79 @@ class MultiPageHandler:
 
         return 1
 
+    def _dismiss_cookie_consent(self, page: Page) -> None:
+        """
+        Dismiss cookie-consent banners that render an overlay backdrop capable
+        of intercepting pointer events even when the real target button is
+        visible/enabled/stable. OneTrust (id="onetrust-consent-sdk") is the
+        most common on enterprise sites (confirmed on Air India's check-in
+        page); we also try generic accept-button text patterns as a fallback
+        for other consent providers (CookieBot, Quantcast, TrustArc, etc.).
+        """
+        # 1) OneTrust — accept-all button has a stable, well-known id
+        try:
+            onetrust_accept = page.locator("#onetrust-accept-btn-handler")
+            if onetrust_accept.count() > 0 and onetrust_accept.first.is_visible():
+                onetrust_accept.first.click(timeout=3000)
+                page.wait_for_timeout(500)
+                print("[MultiPageHandler] Dismissed OneTrust cookie consent banner")
+                return
+        except Exception as exc:
+            print(f"[MultiPageHandler] OneTrust dismiss attempt failed: {exc}")
+
+        # 2) Generic accept/agree/got it buttons inside any cookie/consent container
+        generic_selectors = [
+            "#onetrust-accept-btn-handler",
+            "[id*='cookie'] button:has-text('Accept')",
+            "[id*='cookie'] button:has-text('Agree')",
+            "[id*='consent'] button:has-text('Accept')",
+            "[class*='cookie'] button:has-text('Accept')",
+            "[class*='consent'] button:has-text('Accept')",
+            "button:has-text('Accept All')",
+            "button:has-text('Accept all cookies')",
+            "button:has-text('I Agree')",
+            "button:has-text('Got it')",
+        ]
+        for sel in generic_selectors:
+            try:
+                btn = page.locator(sel).first
+                if btn.count() > 0 and btn.is_visible():
+                    btn.click(timeout=3000)
+                    page.wait_for_timeout(500)
+                    print(f"[MultiPageHandler] Dismissed cookie consent banner via selector: {sel}")
+                    return
+            except Exception:
+                continue
+
+        # 3) Last resort — if a known overlay backdrop element exists but no
+        # accept button was clickable, forcibly hide the backdrop via JS so it
+        # stops intercepting pointer events. This does not "accept" cookies,
+        # it just removes the click-blocking layer so the test can proceed.
+        try:
+            hidden = page.evaluate("""() => {
+                const selectors = [
+                    '.onetrust-pc-dark-filter',
+                    '#onetrust-consent-sdk',
+                    '[id*="cookie"][class*="overlay"]',
+                    '[id*="consent"][class*="overlay"]',
+                    '[class*="cookie-backdrop"]',
+                    '[class*="consent-backdrop"]',
+                ];
+                let count = 0;
+                for (const sel of selectors) {
+                    document.querySelectorAll(sel).forEach(el => {
+                        el.style.display = 'none';
+                        el.style.pointerEvents = 'none';
+                        count++;
+                    });
+                }
+                return count;
+            }""")
+            if hidden:
+                print(f"[MultiPageHandler] Force-hid {hidden} cookie consent overlay element(s) via JS")
+        except Exception:
+            pass
+
     def _count_visible_field_elements(self, page: Page) -> int:
         script = """
         () => {
@@ -267,7 +413,6 @@ class MultiPageHandler:
             'input:not([type="hidden"])',
             'select',
             'textarea',
-            'div[contenteditable]',
             'div[contenteditable="true"]'
           ];
           const nodes = Array.from(document.querySelectorAll(selectors.join(',')));

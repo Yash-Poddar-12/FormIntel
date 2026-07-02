@@ -20,7 +20,9 @@ class FieldDetector:
     """Detect form-like fields and OR groups from the active Playwright page."""
 
     # ------------------------------------------------------------------
-    # Main field detection script (unchanged from before)
+    # Main field detection script
+    # FIX: removed duplicate 'div[contenteditable]' selector — it was matching
+    # the same elements as 'div[contenteditable="true"]', causing duplicate fields.
     # ------------------------------------------------------------------
     _SCRIPT = r"""
 () => {
@@ -146,13 +148,9 @@ class FieldDetector:
   };
 
   // ── Visibility filter ──────────────────────────────────────────────────
-  // Returns true if the element is actually rendered and visible on screen.
   const isVisible = (el) => {
     if (!el) return false;
-    // offsetParent is null for display:none elements (and position:fixed in some browsers)
-    // but we also check getBoundingClientRect for zero-size elements.
     if (el.offsetParent === null) {
-      // position:fixed elements have null offsetParent but may still be visible
       const style = window.getComputedStyle(el);
       if (style.position !== 'fixed') return false;
     }
@@ -164,8 +162,6 @@ class FieldDetector:
   };
 
   // ── Noise container filter ─────────────────────────────────────────────
-  // Returns true if the element lives inside a known non-form area:
-  // nav, header, footer, cookie banners, login popovers, newsletter widgets.
   const NOISE_SELECTORS = [
     'nav', 'header', 'footer',
     '[role="navigation"]', '[role="banner"]', '[role="contentinfo"]',
@@ -189,13 +185,15 @@ class FieldDetector:
   const radioGroups = new Map();
   const checkboxGroups = new Map();
   const seenStandaloneCheckboxes = new Set();
+
+  // FIX: was 'input, select, textarea, div[contenteditable], div[contenteditable="true"]'
+  // The bare div[contenteditable] matched the same elements as div[contenteditable="true"],
+  // producing duplicate field entries. Now using only the explicit value selector.
   const nodes = Array.from(document.querySelectorAll(
-    'input, select, textarea, div[contenteditable], div[contenteditable="true"]'
+    'input, select, textarea, div[contenteditable="true"]'
   ));
   for (const node of nodes) {
-    // Skip invisible elements — catches CSS-hidden inputs, collapsed sections, etc.
     if (!isVisible(node)) continue;
-    // Skip elements inside nav, header, footer, cookie banners, login popovers, etc.
     if (isInNoiseContainer(node)) continue;
     const tag = node.tagName.toLowerCase();
     if (tag === "input") {
@@ -240,7 +238,6 @@ class FieldDetector:
       field.type = "otp";
       field.skip = false;
     }
-    // Detect React Select: combobox inputs are often hidden but need container-based filling.
     if (field.type === "text" && node.getAttribute("role") === "combobox") {
       const inputId = toText(node.id);
       if (inputId.includes("react-select")) {
@@ -294,23 +291,12 @@ class FieldDetector:
 
     # ------------------------------------------------------------------
     # OR group detection script
-    # Finds "OR" text separators between fields and returns which
-    # field indices are alternatives to each other.
-    #
-    # Example result for BHFL form:
-    # [
-    #   {"group_id": 0, "description": "Mobile OR Loan Account",
-    #    "before_indices": [0], "after_indices": [1]},
-    #   {"group_id": 1, "description": "Date of Birth OR Applicant PAN",
-    #    "before_indices": [2], "after_indices": [3]}
-    # ]
     # ------------------------------------------------------------------
     _OR_GROUP_SCRIPT = r"""
 (detectedFields) => {
     const orGroups = [];
     let groupId = 0;
 
-    // Step 1: Find all text nodes that contain exactly "OR"
     const orElements = [];
     const walker = document.createTreeWalker(
         document.body,
@@ -328,10 +314,6 @@ class FieldDetector:
         }
     }
 
-    // Step 2: For each OR marker, find fields that are spatially
-    // ADJACENT to it — within a tight proximity window.
-    // This prevents OR markers from accidentally capturing fields
-    // from other rows on the same page.
     for (const orEl of orElements) {
         const orRect = orEl.getBoundingClientRect();
         if (orRect.width === 0 && orRect.height === 0) continue;
@@ -339,9 +321,6 @@ class FieldDetector:
         const orCenterX = orRect.left + orRect.width / 2;
         const orCenterY = orRect.top + orRect.height / 2;
 
-        // How far (px) a field centre may be from the OR marker to count as its neighbour.
-        // Horizontal rows: fields sit left/right within ~200px vertically of the marker.
-        // Vertical stacks: fields sit above/below within ~200px horizontally of the marker.
         const PROXIMITY = 200;
 
         const beforeIndices = [];
@@ -359,12 +338,7 @@ class FieldDetector:
             const dX = Math.abs(elCenterX - orCenterX);
             const dY = Math.abs(elCenterY - orCenterY);
 
-            // Horizontal layout: field and OR are on the same row (dY small),
-            // and field is within PROXIMITY pixels horizontally.
             const isHorizontalNeighbour = dY < 80 && dX < PROXIMITY;
-
-            // Vertical layout: field and OR are in the same column (dX small),
-            // and field is within PROXIMITY pixels vertically.
             const isVerticalNeighbour = dX < 200 && dY < PROXIMITY;
 
             if (isHorizontalNeighbour) {
@@ -374,7 +348,6 @@ class FieldDetector:
                 if (elCenterY < orCenterY - 20) beforeIndices.push(field.index);
                 else if (elCenterY > orCenterY + 20) afterIndices.push(field.index);
             }
-            // Fields outside the proximity window are ignored for this OR marker.
         }
 
         if (beforeIndices.length > 0 && afterIndices.length > 0) {
@@ -437,27 +410,10 @@ class FieldDetector:
     ) -> list[dict[str, Any]]:
         """
         Detect OR separator groups on the page.
-        Requires already-detected fields as input so it can match
-        field indices to their screen positions.
-
-        Returns list of OR group dicts:
-        [
-          {
-            "group_id": 0,
-            "description": "Mobile Number OR Loan Account Number",
-            "before_indices": [0],   <- field indices on left/above OR
-            "after_indices": [1]     <- field indices on right/below OR
-          },
-          ...
-        ]
-
-        Empty list = no OR separators found on this page.
         """
         if not fields:
             return []
         try:
-            # Pass the detected fields into the JS so it can match
-            # selectors to bounding rects
             result = page.evaluate(self._OR_GROUP_SCRIPT, fields)
             if not isinstance(result, list):
                 return []

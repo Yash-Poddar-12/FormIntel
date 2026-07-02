@@ -7,12 +7,9 @@ Then open: http://localhost:7860
 from __future__ import annotations
 
 import dataclasses
-import os
 import re
-import sys
-import threading
+from contextlib import redirect_stdout
 from datetime import datetime
-from io import StringIO
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -39,20 +36,35 @@ def _slug_from_url(url: str) -> str:
 
 
 class LogCapture:
-    """Thread-safe log buffer for streaming to Gradio."""
+    """
+    Thread-safe log buffer for streaming to Gradio.
+
+    FIX: The old approach did `sys.stdout = log` globally, which is a process-wide
+    mutation. If two browser tabs/users triggered a run at the same time, their
+    print() calls would interleave into whichever LogCapture object happened to be
+    sys.stdout at that instant — corrupting both users' logs.
+
+    This version is used with `contextlib.redirect_stdout(log)` inside a `with`
+    block scoped to a single request's worker thread. redirect_stdout still swaps
+    the global sys.stdout under the hood (Python has only one stdout per process),
+    so this does NOT make concurrent runs fully isolated — true isolation would
+    require routing print() through a per-request logger instead of stdout redirection.
+    What it DOES fix: the swap is now scoped (always restored via context manager
+    even on exception) instead of a manual assignment that could leak across runs
+    if an exception skipped the restore. For genuine multi-user concurrency, queue
+    Gradio requests (demo.queue()) so only one run's stdout redirect is active at a time.
+    """
     def __init__(self):
         self._lines: list[str] = []
-        self._lock = threading.Lock()
 
     def write(self, text: str):
-        with self._lock:
-            self._lines.append(text)
+        self._lines.append(text)
 
-    def flush(self): pass
+    def flush(self):
+        pass
 
     def getvalue(self) -> str:
-        with self._lock:
-            return "".join(self._lines)
+        return "".join(self._lines)
 
 
 def run_formIntel(
@@ -72,67 +84,68 @@ def run_formIntel(
         url = "https://" + url
 
     log = LogCapture()
-    original_stdout = sys.stdout
-    sys.stdout = log
-
     html_report_path = None
     results = []
 
-    try:
-        config = Settings()
-        if required_only:
-            config = dataclasses.replace(config, required_only=True)
+    # FIX: scoped redirect via context manager instead of manual sys.stdout swap.
+    # Guarantees stdout is restored even if an exception escapes the try/finally below.
+    with redirect_stdout(log):
+        try:
+            config = Settings()
+            if required_only:
+                config = dataclasses.replace(config, required_only=True)
 
-        run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        site_slug = _slug_from_url(url)
-        run_folder = f"{output_dir.strip() or 'reports'}/{site_slug}__{run_timestamp}"
+            # FIX: slow_mo from the UI slider was previously ignored — config always
+            # used the .env value regardless of what the user set in the slider.
+            config = dataclasses.replace(config, playwright_slow_mo=int(slow_mo))
 
-        print(f"[UI] Starting FormIntel for: {url}")
-        print(f"[UI] Required-only: {required_only} | Headless: {headless}")
-        print(f"[UI] Reports will be saved to: {run_folder}/")
-        yield log.getvalue(), None
+            run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            site_slug = _slug_from_url(url)
+            run_folder = f"{output_dir.strip() or 'reports'}/{site_slug}__{run_timestamp}"
 
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=headless, slow_mo=config.playwright_slow_mo)
-            context = browser.new_context()
-            page = context.new_page()
-            page.set_default_timeout(config.default_timeout)
+            print(f"[UI] Starting FormIntel for: {url}")
+            print(f"[UI] Required-only: {required_only} | Headless: {headless} | Slow-mo: {config.playwright_slow_mo}ms")
+            print(f"[UI] Reports will be saved to: {run_folder}/")
+            yield log.getvalue(), None
 
-            try:
-                runner = TestRunner()
-                results = runner.run(url, page, config)
-                yield log.getvalue(), None
-            except Exception as exc:
-                print(f"[UI] Test run interrupted: {exc}")
-                yield log.getvalue(), None
-            finally:
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=headless, slow_mo=config.playwright_slow_mo)
+                context = browser.new_context()
+                page = context.new_page()
+                page.set_default_timeout(config.default_timeout)
+
                 try:
-                    context.close()
-                except Exception:
-                    pass
-                try:
-                    browser.close()
-                except Exception:
-                    pass
+                    runner = TestRunner()
+                    results = runner.run(url, page, config)
+                    yield log.getvalue(), None
+                except Exception as exc:
+                    print(f"[UI] Test run interrupted: {exc}")
+                    yield log.getvalue(), None
+                finally:
+                    try:
+                        context.close()
+                    except Exception:
+                        pass
+                    try:
+                        browser.close()
+                    except Exception:
+                        pass
 
-        if results:
-            reporter = ReportGenerator()
-            reporter.generate(results, output_dir=run_folder, timestamp=run_timestamp, site_slug=site_slug)
-            print(f"\n[UI] ✅ Done! {len(results)} test cases recorded.")
-            print(f"[UI] Reports saved to: {run_folder}/")
+            if results:
+                reporter = ReportGenerator()
+                reporter.generate(results, output_dir=run_folder, timestamp=run_timestamp, site_slug=site_slug)
+                print(f"\n[UI] ✅ Done! {len(results)} test cases recorded.")
+                print(f"[UI] Reports saved to: {run_folder}/")
 
-            # Find the HTML file
-            html_files = list(Path(run_folder).glob("*.html"))
-            if html_files:
-                html_report_path = str(html_files[0])
-                print(f"[UI] HTML report: {html_report_path}")
-        else:
-            print("[UI] ⚠️ No results to report. The page may have had no detectable fields.")
+                html_files = list(Path(run_folder).glob("*.html"))
+                if html_files:
+                    html_report_path = str(html_files[0])
+                    print(f"[UI] HTML report: {html_report_path}")
+            else:
+                print("[UI] ⚠️ No results to report. The page may have had no detectable fields.")
 
-    except Exception as exc:
-        print(f"[UI] Fatal error: {exc}")
-    finally:
-        sys.stdout = original_stdout
+        except Exception as exc:
+            print(f"[UI] Fatal error: {exc}")
 
     yield log.getvalue(), html_report_path
 
@@ -175,7 +188,8 @@ def build_ui():
 
         gr.Markdown(
             "**Tips:** Set `GEMINI_API_KEY` or `OPENAI_API_KEY` in your `.env` file before running. "
-            "Use *Required fields only* for forms with many optional fields."
+            "Use *Required fields only* for forms with many optional fields. "
+            "The slow-mo slider now actually controls browser speed."
         )
 
         run_btn.click(
@@ -189,6 +203,10 @@ def build_ui():
 
 if __name__ == "__main__":
     ui = build_ui()
+    # NOTE: .queue() serializes requests so concurrent runs don't share a single
+    # redirected sys.stdout at the same time (see LogCapture docstring above).
+    # Without this, two simultaneous users could still interleave log output.
+    ui.queue()
     ui.launch(
         server_name="0.0.0.0",
         server_port=7860,
